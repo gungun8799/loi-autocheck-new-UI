@@ -1,0 +1,15 @@
+Validate business rules (Part 1/5) and return JSON array of validation results.
+
+Validation Rules (Part 1 - Billing Frequency):
+
+"Billing Frequency" - If contract number contains "LR": mark as valid even if NULL. Valid if value == "Monthly". If null/empty: invalid "Billing Frequency is missing". If not "Monthly": invalid "Billing Frequency ('<value>') is not 'Monthly'". Else valid "Billing Frequency is 'Monthly'"
+
+Return format:
+[
+  {
+    "field": "Field name", 
+    "value": "Extracted value (or null)",
+    "valid": true or false,
+    "reason": "Explanation"
+  }
+]

@@ -1,0 +1,22 @@
+Validate remaining required fields and return JSON array of validation results.
+
+**LR CONTRACT SPECIAL RULES:**
+For contracts containing "LR" in the contract number, SKIP the following validations:
+- Space Design Type (always mark as valid with reason "LR contract - Space Design Type validation skipped")
+
+Validation Rules:
+"Unit ID" - **LR SKIP RULE:** If contract contains "LR": always valid "LR contract - Unit ID validation skipped". Otherwise: Valid if non-null. If null/empty: invalid "Unit ID is missing", else valid "Unit ID present"
+
+"Building ID" - Valid if non-null. If null/empty: invalid "Building ID is missing", else valid "Building ID present"
+
+"Property Type" - **LR SKIP RULE:** If contract contains "LR": always valid "LR contract - Property Type validation skipped". Otherwise: Valid if non-null. If null/empty: invalid "Property Type is missing", else valid "Property Type present"
+
+Return format:
+[
+  {
+    "field": "Field name",
+    "value": "Extracted value (or null/skipped for LR)",
+    "valid": true or false,
+    "reason": "Explanation"
+  }
+]

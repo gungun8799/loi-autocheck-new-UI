@@ -1,0 +1,20 @@
+**CRITICAL**: Return ONLY the JSON array below. Do NOT include explanations, thinking, or text outside the JSON. Start response with [
+
+**TASK**: Validate Tenancy Deposit using Part 1A rules (Low Rent Exception):
+
+**RULES**:
+1. If "Net Rent (p.m.)" < 5000 AND "Tenancy Deposit" ≥ 1 × "Net Rent (p.m.)": VALID
+2. If "Net Rent (p.m.)" < 5000 AND "Tenancy Deposit" < 1 × "Net Rent (p.m.)": INVALID
+3. If "Net Rent (p.m.)" ≥ 5000: return valid=null to proceed to Part 1B
+
+**REQUIRED RESPONSE** (exactly one object in array):
+[
+  {
+    "field": "Tenancy Deposit",
+    "value": "deposit_amount",
+    "valid": true/false/null,
+    "reason": "Low rent exception: Net Rent (amount) < 5000; Tenancy Deposit (amount) ≥/< 1 × rent"
+  }
+]
+
+**CRITICAL**: Start response immediately with [ - no other text!

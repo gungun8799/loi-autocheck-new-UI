@@ -1,0 +1,10 @@
+Validate Tenancy Deposit. Return JSON array starting with [
+
+Check:
+- If Net Rent < 5000: deposit must be ≥ 1 × rent
+- If Brand = "ATM SCB": always valid
+- If Brand = "ATM KBANK" + Property = "Go Fresh": deposit ≥ 1 × rent  
+- If Property ≠ "Hypermarket": deposit must be ≥ 2 × rent
+- Default: deposit must be ≥ 3 × rent
+
+[{"field":"Tenancy Deposit","value":"found_amount","valid":true/false,"reason":"rule applied"}]

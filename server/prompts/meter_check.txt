@@ -1,0 +1,57 @@
+**STRICT INSTRUCTIONS**: 
+- Your response must be EXACTLY a JSON array starting with [ and ending with ]
+- Do NOT use <think> tags, <reasoning> tags, or ANY XML tags
+- Do NOT include explanations, commentary, or text outside the JSON
+- Do NOT add prefixes like "Here is the result:" or "Based on analysis:"
+- Return ONLY the raw JSON array
+
+**TASK**: Analyze the meter table data below to check if each meter type has at least one **Active** meter:
+
+**METER TYPE DETECTION**:
+- Electricity meter: Look for serial numbers containing "EH" AND status "Active"
+- Water meter: Look for serial numbers containing "WH" AND status "Active"  
+- Gas meter: Look for serial numbers containing "GH" AND status "Active"
+
+**LO CONTRACT VALIDATION RULES** (when CONTRACT_TYPE is "LO"):
+- If "Utilities charge (Electricity)" > 0: Electricity meter MUST exist to be valid
+- If "Utilities charge (water)" > 0: Water meter MUST exist to be valid  
+- If "Utilities charge (cooking gas)" > 0: Gas meter MUST exist to be valid
+- If utility charge = 0: Meter is not required, validation passes regardless of meter presence
+- **IMPORTANT**: Both "meter required and found" AND "meter not required and not found" are valid scenarios
+
+**TABLE FORMAT**: The data contains columns like:
+Meter Tag | Meter Serial Number | Meter Mac Address | Meter Utility Type | Status | Building | Location
+
+**REQUIRED RESPONSE FORMAT** (copy exactly, replace values):
+[
+  {
+    "field": "Electricity Meter Present",
+    "value": "yes",
+    "valid": true,
+    "reason": "Found active electricity meter with serial 01009EH028"
+  },
+  {
+    "field": "Water Meter Present", 
+    "value": "no",
+    "valid": true,
+    "reason": "Water meter not required (charge = 0)"
+  },
+  {
+    "field": "Gas Meter Present",
+    "value": "no",
+    "valid": true,
+    "reason": "Gas meter not required (charge = 0)"
+  }
+]
+
+**VALIDATION RULES**:
+- For NON-LO contracts: Set "value": "yes" and "valid": true ONLY if you find Active meters with the correct pattern
+- For LO contracts: Apply smart validation based on utility charges:
+  * If utility charge > 0 AND meter found: "valid": true, "value": "yes" ✅
+  * If utility charge > 0 AND meter NOT found: "valid": false, "value": "no" ❌
+  * If utility charge = 0 AND meter found: "valid": true, "value": "yes" ✅ 
+  * If utility charge = 0 AND meter NOT found: "valid": true, "value": "no" ✅ (not required, correct)
+- **KEY PRINCIPLE**: Validation passes when meter presence matches utility charge requirement
+- Always include all three meter types in your response
+
+**CRITICAL**: Start your response immediately with [ - no other text allowed!

@@ -1,0 +1,54 @@
+Compare deposit and lease basic terms between PDF and Web sources for SERVICE EXPRESS contracts. Return JSON array of comparison results.
+
+Compare these deposit and basic lease fields:
+
+"Lease Type" - **SERVICE EXPRESS DETECTION:** Look for "สั ญ ญ า บ ริ ก า ร พื้ น ที่" or "Service Express" patterns in PDF. Should extract as "Service Express" for this contract type
+
+"Billing Frequency" - If contract number contains "LR": mark as Match if Web info is NULL, otherwise compare normally
+
+"Monthly charge" - Output "Yes" or "No" comparison
+
+"Total Deposits" - **SERVICE EXPRESS:** Compare total deposit amounts (Service Express uses single total, not separate rent/service deposits)
+
+"Tenancy Deposit" - Compare total deposit amounts for Service Express contracts
+
+**REQUIREMENT**: The response MUST be a JSON array containing comparison results for ALL deposit and basic lease fields mentioned above.
+
+Return format (JSON ARRAY):
+[
+  {
+    "field": "Lease Type",
+    "pdf": "PDF value", 
+    "web": "Web value",
+    "match": true or false,
+    "reason": "Explanation of comparison logic"
+  },
+  {
+    "field": "Billing Frequency",
+    "pdf": "PDF value", 
+    "web": "Web value",
+    "match": true or false,
+    "reason": "Explanation"
+  },
+  {
+    "field": "Monthly charge",
+    "pdf": "PDF value", 
+    "web": "Web value",
+    "match": true or false,
+    "reason": "Explanation"
+  },
+  {
+    "field": "Total Deposits",
+    "pdf": "PDF value", 
+    "web": "Web value",
+    "match": true or false,
+    "reason": "Service Express deposit comparison"
+  },
+  {
+    "field": "Tenancy Deposit",
+    "pdf": "PDF value", 
+    "web": "Web value",
+    "match": true or false,
+    "reason": "Total deposit comparison for Service Express"
+  }
+]

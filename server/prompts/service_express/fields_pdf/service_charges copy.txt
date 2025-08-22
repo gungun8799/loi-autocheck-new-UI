@@ -1,0 +1,45 @@
+Extract service charge information from PDF data and return in JSON format.
+
+**IMPORTANT:** For PDF data, look for Thai text patterns. Common area service charges appear as "ค่าบริการพิเศษสำหรับไอเย็น" or "ค่าบริการพิเศษสําหรับไอเย็นและไฟฟ้า(พื้นที่ส่วนกลาง)" with amounts like "เดือนละ <amount> บาท" and date ranges like "ตั้งแต่วันที่ <date> จนถึงวันที่ <date>".
+
+**CRITICAL MAPPING RULES:**
+
+* "Common Area Cool Air Service Fee" → Map to "Common area" (public space) fields, NOT "in the renting space" fields
+* Only map charges to "in the renting space" if they are explicitly for the tenant’s individual space (e.g., “ในพื้นที่เช่า”, “เฉพาะพื้นที่เช่า”, “ในเขตร้าน/บูธ”) and the evidence (indicator + amount) appears on the same line or within ±1 line
+* Do NOT use base/standard monthly fee lines or clause-wide amounts/dates (e.g., “อัตราเดือนละ … บาท” tied to ข้อ 2, or overall contract period dates) as “in the renting space” evidence
+* If only "Common Area Cool Air Service Fee" exists, all "in the renting space" fields must be NULL and the amount must be "0.00"
+* **Ambiguity rule:** If an “in the renting space” indicator and its amount are not clearly co-located (same line or ±1 line), treat as not present → amount "0.00" and other “in the renting space” fields NULL
+* **IMPORTANT:** If "Other service charge before tax (in the renting space)" is "0" or "0.00", then ALL of the following fields MUST return null/empty:
+
+  * "Other service charge (in the renting space) Charge description"
+  * "Other service charge (in the renting space) start date"
+  * "Other service charge (in the renting space) end date"
+
+Required fields:
+"Other service charge before tax (in the renting space)" -
+**PDF PATTERNS:** Look for service charges specifically for the renting space (not common area). Require an explicit “in the renting space” indicator near the amount (same line or ±1 line). Extract "<amount>" from Thai patterns like “เดือนละ <amount> บาท”. If no qualifying evidence, return "0" or "0.00".
+
+"Other service charge (in the renting space) Charge description" -
+**PDF PATTERNS:** Extract only if a specific non–common-area charge for the renting space is evidenced (indicator + amount co-located). If only common-area charges exist or amount is "0"/"0.00", return NULL.
+
+"Other service charge (in the renting space) start date" -
+**PDF PATTERNS:** Extract only if the in-renting-space amount > 0 and the date phrase (e.g., “ตั้งแต่วันที่ <date>”) is on the same line or within ±1 line of that specific charge. If only common-area charges exist or amount is "0"/"0.00", return NULL.
+
+"Other service charge (in the renting space) end date" -
+**PDF PATTERNS:** Extract only if the in-renting-space amount > 0 and the date phrase (e.g., “จนถึงวันที่ <date>”) is on the same line or within ±1 line of that specific charge. If only common-area charges exist or amount is "0"/"0.00", return NULL.
+
+"Other service charge before tax (public space)" - If cannot find anything, put "0.00"
+
+"Other service charge (public space) Charge description" - Description for public/common area charges
+
+"Other service charge (public space) start date" - Start date for public/common area charges
+
+"Other service charge (public space) end date" - End date for public/common area charges
+
+**PDF-SPECIFIC THAI PATTERNS:**
+
+* Look for "ค่าบริการ" (service charge) followed by descriptions
+* Date patterns: "ตั้งแต่วันที่ <date>" (from date) and "จนถึงวันที่ <date>" (to date); only attach to a field if tied to that specific charge line (same line or ±1 line)
+* Amount patterns: "เดือนละ <amount> บาท" (per month, baht); amounts are arbitrary and must be parsed flexibly (no hardcoded values)
+* Common area indicators: "พื้นที่ส่วนกลาง", "ค่าบริการพิเศษสำหรับไอเย็น", "ค่าบริการพิเศษสําหรับไอเย็นและไฟฟ้า(พื้นที่ส่วนกลาง)"
+* Individual space indicators: explicit tenant/space phrases such as "ในพื้นที่เช่า", "เฉพาะพื้นที่เช่า", "ในเขตร้าน/บูธ"

@@ -1,0 +1,26 @@
+Extract signature information from WEB scraped data and return in JSON format.
+
+**WEB-SPECIFIC NOTE:** Web interfaces typically show signature status or upload fields rather than actual signatures.
+
+Required fields:
+"CP Axtra signee 1 (has signature or not)" - **WEB:** Check if CP Axtra signature field is completed or document uploaded in web interface. Return "Yes" if signed/uploaded, "No" if pending
+
+"CP Axtra signee 1 (name of the signed person)" - **WEB:** Extract CP Axtra signee name from web form fields or uploaded signature documents. Typically shows authorized person name
+
+"CP Axtra witness (has signature or not)" - **WEB:** Check if CP Axtra witness signature field is completed in web interface. Return "Yes" if signed/uploaded, "No" if pending
+
+"CP Axtra witness (name of the signed person)" - **WEB:** Extract CP Axtra witness name from web form signature fields or document metadata
+
+"Customer signee 1 (has signature or not)" - **WEB:** Check if customer signature field is completed or signature document uploaded. Return "Yes" if signed/uploaded, "No" if pending
+
+"Customer signee 1 (name of the signed person)" - **WEB:** Extract customer signee name from web form fields. If not clearly provided in web interface, return null
+
+"Customer witness (has signature or not)" - **WEB:** Check if customer witness signature field is completed in web interface. Return "Yes" if signed/uploaded, "No" if pending
+
+"Customer witness (name of the signed person)" - **WEB:** Extract customer witness name from web form fields. If not provided in web interface, return null
+
+**WEB EXTRACTION NOTES:**
+- Web interfaces may show signature status rather than actual signatures
+- Look for upload fields, signature completion indicators, or form validation states
+- Names may come from form fields rather than signature images
+- Some signature information may not be available until document finalization

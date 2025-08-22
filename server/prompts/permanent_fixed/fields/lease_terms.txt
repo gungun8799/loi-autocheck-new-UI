@@ -1,0 +1,260 @@
+Extract lease terms for PERMANENT FIXED contracts and return as a complete JSON object with ALL required fields listed below.
+
+**INTELLIGENT YEAR ALLOCATION LOGIC:**
+When extracting Year-by-Year details, MUST intelligently calculate year boundaries:
+
+**CRITICAL: CONTRACT DURATION DETECTION FIRST:**
+1. **PDF SOURCES**: Look for "ระยะเวลาการเช่า" followed by duration indicators:
+   - "1 ปี" = 1-year contract
+   - "2 ปี" = 2-year contract  
+   - "3 ปี" = 3-year contract
+   - Calculate from start/end dates if no explicit duration found
+2. **WEB SOURCES**: Calculate duration from "Proposed lease commencement date" to "Proposed lease expiry date"
+
+**AMOUNT EXTRACTION STRATEGY:**
+- **1-YEAR CONTRACTS**: Extract amounts directly from main payment section (e.g., section 4 "ค่าเช่าและค่าบริการ") 
+- **MULTI-YEAR CONTRACTS**: Look for year-specific amounts, or use base amounts for all years if not specified differently
+
+**YEAR BOUNDARY CALCULATIONS:**
+- Each year should have exactly 12 months (1 year) duration
+- Calculate year boundaries intelligently based on detected contract duration:
+  * Year 1: Start = Contract commencement date, End = Start date + 11 months + 30 days
+  * Year 2: Start = Year 1 End date + 1 day, End = Start date + 11 months + 30 days  
+  * Year 3: Start = Year 2 End date + 1 day, End = Contract expiry date (or calculated)
+
+**DYNAMIC YEAR INCLUSION:**
+- Only include years that actually exist in the contract duration
+- If lease is 2 years total, only show Year 1 and Year 2
+- If lease is 1 year total, only show Year 1
+- Do NOT include Year 3 unless contract actually spans 3+ years
+
+Required fields:
+"Lease Type" - **CRITICAL: ALWAYS "Permanent Fixed" FOR PERMANENT_FIXED CONTRACT TYPE**:
+1. **MANDATORY RULE**: Since this is the permanent_fixed contract type processing, ALWAYS return "Permanent Fixed"
+2. **DO NOT EXTRACT FROM DOCUMENT**: The lease type is determined by the contract processing type, not document content
+3. **IGNORE MISLEADING PATTERNS**: 
+   - Ignore "Type: PN Service" - this is Tenant Type, NOT Lease Type
+   - Ignore "Service" keywords - they refer to tenant business category, not lease type
+   - Ignore any text containing "Service" in tenant or business context
+4. **CONTEXT UNDERSTANDING**: 
+   - "Type: PN Service" = Tenant business category (extract for Tenant Type field)
+   - "Lease Type" = Contract classification (always "Permanent Fixed" for this processing)
+5. **FIXED VALUE**: Return "Permanent Fixed" regardless of document content
+
+"Lease property tax rate" - **CRITICAL EXTRACTION PATTERNS**:
+**PDF PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "ภาษีที่ดินและสิ่งปลูกสร้าง ในอัตราร้อยละ" followed by numbers
+2. **FLEXIBLE SPACING**: Handle spaced text like "ภ า ษี ที่ ดิ น แ ล ะ สิ่ ง ป ลู ก ส ร้ า ง ใ น อั ต ร า ร้ อ ย ล ะ" followed by numbers
+3. **ALTERNATIVE PATTERNS**: Look for "อัตราร้อยละ" or "ร้อยละ" followed by numbers in tax contexts
+4. **THAI DECIMAL FORMAT**: Handle Thai comma-as-decimal format:
+   - "10,00" → extract as "10" (remove decimal if .00)
+   - "12,50" → extract as "12.5" or "12.50"  
+   - "10.00" → extract as "10"
+**WEB PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "LEASE PROPERTY TAX:" followed by values like "PTS - PT Standard", "PT Mall", or numeric values
+2. **CONTEXT MATCHING**: Usually appears in rental schedule sections with "RENTAL RATIO", "BILLING FREQUENCY" nearby
+3. **VALUE EXTRACTION**: Extract the complete text after "LEASE PROPERTY TAX:" (e.g., "PTS - PT Standard", "PT Mall", "10.00", "12.5")
+4. **FLEXIBLE FORMATTING**: Handle variations with spacing like "LEASE PROPERTY TAX :" or "LEASE PROPERTY TAX                        "
+**OUTPUT FORMAT**: Return just the extracted value (e.g., "PTS - PT Standard", "PT Mall", "10", "12.5")
+
+"Monthly charge" - **LO/LR PATTERNS:** Determine if charges are monthly:
+1. **LO Contracts**: Check quotation billing frequency sections
+2. **LR Contracts**: Check existing contract billing terms
+3. Look for "รายเดือน", "monthly", "per month", "ต่อเดือน"
+4. Output "Yes" or "No"
+
+**AMOUNT ALLOCATION RULES:**
+FOR PDF SOURCES: Extract year-specific amounts if they exist
+FOR WEB SOURCES: Use same base amounts for all years unless explicitly different
+
+**AMOUNT EXTRACTION PRIORITY (Web):**
+1. Look for "Monthly Rent" or "Rental Amount" in main lease details (NOT per-square-meter rates)
+2. Look for "Service Charge" or "Service Fee" amounts (NOT per-square-meter rates) 
+3. If you find per-square-meter rates (e.g., "101.4024 per sqm"), multiply by total area to get monthly amount
+4. If only total amounts found, divide by number of years
+5. Ensure amounts are in Thai Baht (THB) - typical range: 5,000-50,000 THB/month
+6. **WARNING:** If extracted amount seems too small (under 1,000 THB), it might be per-sqm rate - recalculate
+
+Year-by-Year Contract Details (ONLY extract years that exist in contract duration):
+
+**INTELLIGENT YEAR CALCULATION FOR LO CONTRACTS:**
+- **LO Contract**: MUST use "Proposed lease commencement date" and "Proposed lease expiry date" from basic info
+- **CRITICAL**: Calculate year boundaries exactly as shown below:
+
+**1-YEAR CONTRACT EXAMPLE:**
+Proposed lease commencement date: 2025-05-01, Proposed lease expiry date: 2026-04-30
+→ Year 1: Start = 2025-05-01, End = 2026-04-30
+→ Year 2: NULL, Year 3: NULL
+
+**2-YEAR CONTRACT EXAMPLE:**
+Proposed lease commencement date: 2025-05-01, Proposed lease expiry date: 2027-04-30
+→ Year 1: Start = 2025-05-01, End = 2026-04-30
+→ Year 2: Start = 2026-05-01, End = 2027-04-30
+→ Year 3: NULL
+
+**LR Contract**: Extract actual dates from contract sections or use same intelligent calculation
+
+"Year 1 : Contract Start date" - **LO/LR PATTERNS:**
+1. **LO Contracts**: Use "Proposed lease commencement date" from basic info (e.g., "2025-05-01")
+2. **LR Contracts**: Extract from contract renewal sections or use Proposed lease commencement date
+3. Format: YYYY-MM-DD
+
+"Year 1 : Contract End date" - **LO/LR PATTERNS:**
+1. **LO Contracts**: Calculate from start date + 1 year - 1 day, or use "Proposed lease expiry date" if 1-year contract
+2. **LR Contracts**: Extract from contract sections or calculate intelligently
+3. Example: Start 2025-05-01 → End 2026-04-30 (for 1-year contract)
+4. Format: YYYY-MM-DD
+"Year 1 : Charge Type" - From section "4.ค่าเช่าและค่าบริการ" if "Fixed rate" or "Not Fixed rate"
+"Year 1 : Monthly Amount of rent" - **CRITICAL ENHANCED PATTERNS FOR LO CONTRACTS:**
+**PDF PATTERNS:**
+1. **PRIMARY**: Look for "ค่าเช่า" followed by amount and "ต่อเดือน" in main payment sections (e.g., "ค่าเช่า 5,308.48 ต่อเดือน")
+2. **FALLBACK**: Look for "Rent per Month" followed by amount on next line  
+3. **CONTEXT**: Usually found in section "ค่าเช่าและค่าบริการ" or similar payment sections
+4. **FORMAT**: Extract numeric value, preserve decimals, remove commas (e.g., "5,308.48" → "5308.48")
+**DURATION LOGIC**: 
+- **1-YEAR CONTRACTS**: Use the single amount found in main payment section for Year 1
+- **MULTI-YEAR CONTRACTS**: Look for year-specific amounts or use base amount for all years
+
+"Year 1 : Monthly Amount of service" - **CRITICAL ENHANCED PATTERNS FOR LO CONTRACTS:**
+**PDF PATTERNS:**
+1. **PRIMARY**: Look for "ค่าบริการ" followed by amount and "ต่อเดือน" in main payment sections (e.g., "ค่าบริการ 7,962.72 ต่อเดือน")
+2. **CONTEXT**: Should appear in same section as rent amounts (usually section "ค่าเช่าและค่าบริการ")
+3. **PROXIMITY**: Often appears immediately after or near the rent amount
+4. **FORMAT**: Extract numeric value, preserve decimals, remove commas (e.g., "7,962.72" → "7962.72")
+**DURATION LOGIC**:
+- **1-YEAR CONTRACTS**: Use the single amount found in main payment section for Year 1  
+- **MULTI-YEAR CONTRACTS**: Look for year-specific amounts or use base amount for all years
+
+"Year 2 : Contract Start date" - **INTELLIGENT CALCULATION (ONLY if contract duration > 1 year):**
+1. **LO Contracts**: Year 1 end date + 1 day (e.g., if Year 1 ends 2026-04-30, Year 2 starts 2026-05-01)
+2. **LR Contracts**: Same calculation or extract from contract sections
+3. If contract is only 1 year total, return NULL
+4. Format: YYYY-MM-DD
+
+"Year 2 : Contract End date" - **INTELLIGENT CALCULATION:**
+1. **LO Contracts**: Year 2 start date + 1 year - 1 day, or use "Proposed lease expiry date" if this is final year
+2. **LR Contracts**: Same calculation or extract from contract sections
+3. Example: Start 2026-05-01 → End 2027-04-30
+4. If contract is only 1 year total, return NULL
+5. Format: YYYY-MM-DD
+"Year 2 : Charge Type" - **LO/LR PATTERNS (ONLY if Year 2 exists):**
+1. **LO Contracts**: Usually "Fixed rate" or extract from quotation terms
+2. **LR Contracts**: From section "4.ค่าเช่าและค่าบริการ" if "Fixed rate" or "Not Fixed rate"
+3. If contract is only 1 year, return NULL
+
+"Year 2 : Monthly Amount of rent" - **ENHANCED EXTRACTION FOR MULTI-YEAR CONTRACTS:**
+1. **DURATION CHECK**: First verify contract duration using "ระยะเวลาการเช่า" - if "1 ปี" found, return NULL
+2. **PATTERN MATCHING FOR YEAR 2**: Look for second time period in payment sections:
+   - Search for payment blocks with different date ranges
+   - Example pattern: "• ตั้งแต่วันที่ 01 กรกฎาคม 2558 จนถึงวันที่ 30 มิถุนายน 2559" followed by "ค่าเช่า [amount] ต่อเดือน"
+   - Extract the rent amount from the SECOND date period (not the first)
+3. **CONTEXT CLUES**: Year 2 amounts typically appear:
+   - After the first payment period in section "4. ค่าเช่าและค่าบริการ"  
+   - With later start dates (e.g., กรกฎาคม vs พฤษภาคม)
+   - As second bullet point "•" in payment sections
+4. **FALLBACK**: If no second period found, use Year 1 amount
+5. **CRITICAL**: If contract duration is only 1 year, this field MUST be NULL
+
+"Year 2 : Monthly Amount of service" - **ENHANCED EXTRACTION FOR MULTI-YEAR CONTRACTS:**
+1. **DURATION CHECK**: First verify contract duration using "ระยะเวลาการเช่า" - if "1 ปี" found, return NULL
+2. **PATTERN MATCHING FOR YEAR 2**: Look for second time period in payment sections:
+   - Search for payment blocks with different date ranges
+   - Example pattern: "• ตั้งแต่วันที่ 01 กรกฎาคม 2558 จนถึงวันที่ 30 มิถุนายน 2559" followed by "ค่าบริการ [amount] ต่อเดือน"
+   - Extract the service amount from the SECOND date period (not the first)
+3. **CONTEXT CLUES**: Year 2 service amounts typically appear:
+   - After the first payment period in section "4. ค่าเช่าและค่าบริการ"
+   - With later start dates (e.g., กรกฎาคม vs พฤษภาคม)
+   - As second bullet point "•" in payment sections
+   - Usually appear right after the Year 2 rent amount
+4. **FALLBACK**: If no second period found, use Year 1 amount
+5. **CRITICAL**: If contract duration is only 1 year, this field MUST be NULL
+
+"Year 3 : Contract Start date" - **INTELLIGENT CALCULATION (ONLY if contract duration > 2 years):**
+1. **LO Contracts**: Year 2 end date + 1 day (e.g., if Year 2 ends 2027-04-30, Year 3 starts 2027-05-01)
+2. **LR Contracts**: Same calculation or extract from contract sections
+3. If contract is 2 years or less, return NULL
+4. Format: YYYY-MM-DD
+
+"Year 3 : Contract End date" - **INTELLIGENT CALCULATION:**
+1. **LO Contracts**: Use "Proposed lease expiry date" (final contract end date)
+2. **LR Contracts**: Same or extract from contract sections
+3. Example: If contract ends 2028-04-30, use that date
+4. If contract is 2 years or less, return NULL
+5. Format: YYYY-MM-DD
+"Year 3 : Charge Type" - **LO/LR PATTERNS (ONLY if Year 3 exists):**
+1. **LO Contracts**: Usually "Fixed rate" or extract from quotation terms
+2. **LR Contracts**: From section "4.ค่าเช่าและค่าบริการ" if "Fixed rate" or "Not Fixed rate"
+3. If contract is 2 years or less, return NULL
+
+"Year 3 : Monthly Amount of rent" - **SMART ALLOCATION (ONLY if Year 3 exists):**
+1. **DURATION CHECK**: First verify contract duration using "ระยะเวลาการเช่า" - if "1 ปี" or "2 ปี" found, return NULL
+2. **LO Contracts**: Use Year 1 amount unless different amount specified for Year 3
+3. **LR Contracts**: Use Year 1 amount unless explicitly different in contract
+4. **CRITICAL**: If contract duration is 2 years or less, this field MUST be NULL
+
+"Year 3 : Monthly Amount of service" - **SMART ALLOCATION (ONLY if Year 3 exists):**
+1. **DURATION CHECK**: First verify contract duration using "ระยะเวลาการเช่า" - if "1 ปี" or "2 ปี" found, return NULL
+2. **LO Contracts**: Use Year 1 amount unless different amount specified for Year 3
+3. **LR Contracts**: Use Year 1 amount unless explicitly different in contract
+4. **CRITICAL**: If contract duration is 2 years or less, this field MUST be NULL
+
+"Total Rent Deposits" - **CRITICAL EXTRACTION PATTERNS**: 
+1. **PRIMARY PATTERN**: Look for "เงินประกันการเช่าจำนวน" followed by amount and "บาท"
+   - Example: "เงินประกันการเช่าจำนวน 18,000.00 บาท และ 145,000" → extract "18000.00"
+2. **FLEXIBLE MATCHING**: Handle variations with spacing, line breaks, or additional text
+   - Pattern may have "และ" (and) or numbers after "บาท"
+   - Extract the FIRST number after "เงินประกันการเช่าจำนวน"
+3. **FORMAT HANDLING**: 
+   - Remove commas from numbers (e.g., "18,000.00" → "18000.00")
+   - Preserve decimal points if present
+   - Extract only the numeric value before any "และ" or additional text
+4. **CONTEXT**: Usually found in deposit/guarantee sections of the contract
+5. **CRITICAL**: Focus on the immediate number after "เงินประกันการเช่าจำนวน", ignore subsequent numbers
+
+"Total Service Deposits" - **CRITICAL EXTRACTION PATTERNS**:
+1. **PRIMARY PATTERN**: Look for "เงินประกันการบริการจำนวน" followed by amount and "บาท" 
+   - Example: "เงินประกันการบริการจำนวน 27,000.00 บาท" → extract "27000.00"
+2. **FORMAT HANDLING**: 
+   - Remove commas from numbers (e.g., "27,000.00" → "27000.00")
+   - Preserve decimal points if present
+   - Extract the complete numeric value after "เงินประกันการบริการจำนวน"
+3. **ADDITIONAL PATTERNS**: Handle variations:
+   - May appear with parenthetical notes like "(ไม่รวมภาษีมูลค่าเพิ่ม)"
+   - Extract the number before any parenthetical text
+4. **CONTEXT**: Usually appears after rent deposit in the same guarantee section
+5. **CRITICAL**: Focus on the immediate number after "เงินประกันการบริการจำนวน"
+
+"Tenancy Deposits" - **CALCULATED FIELD - MANDATORY FOR ALL CONTRACTS**:
+1. **CALCULATION**: Sum of "Total Rent Deposits" + "Total Service Deposits" 
+2. **IMPORTANT**: Calculate this value AFTER extracting both deposit amounts above
+3. **EXAMPLE**: If Total Rent Deposits = "21233.92" and Total Service Deposits = "31850.88", then Tenancy Deposits = "53084.80"
+4. **NULL HANDLING**: If either deposit is NULL or cannot be extracted, treat as 0 in calculation
+5. **FORMAT**: Return as numeric string without thousands separators (e.g., "53084.80")
+6. **CRITICAL FOR LO CONTRACTS**: This field is essential for deposit validation in LO contracts
+
+**CRITICAL**: You MUST return a complete JSON object containing ALL the fields listed above. Do not return partial results or skip fields. If a field cannot be determined, use "NULL" as the value.
+
+**REQUIRED JSON FORMAT:**
+{
+  "Lease Type": "value",
+  "Lease property tax rate": "value", 
+  "Monthly charge": "Yes" or "No",
+  "Year 1 : Contract Start date": "value",
+  "Year 1 : Contract End date": "value",
+  "Year 1 : Charge Type": "value",
+  "Year 1 : Monthly Amount of rent": "value",
+  "Year 1 : Monthly Amount of service": "value",
+  "Year 2 : Contract Start date": "value or NULL if not applicable",
+  "Year 2 : Contract End date": "value or NULL if not applicable", 
+  "Year 2 : Charge Type": "value or NULL if not applicable",
+  "Year 2 : Monthly Amount of rent": "value or NULL if not applicable",
+  "Year 2 : Monthly Amount of service": "value or NULL if not applicable",
+  "Year 3 : Contract Start date": "value or NULL if not applicable",
+  "Year 3 : Contract End date": "value or NULL if not applicable",
+  "Year 3 : Charge Type": "value or NULL if not applicable", 
+  "Year 3 : Monthly Amount of rent": "value or NULL if not applicable",
+  "Year 3 : Monthly Amount of service": "value or NULL if not applicable",
+  "Total Rent Deposits": "value",
+  "Total Service Deposits": "value",
+  "Tenancy Deposits": "calculated value (Total Rent Deposits + Total Service Deposits)"
+}

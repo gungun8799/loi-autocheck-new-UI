@@ -1,0 +1,20 @@
+Validate business rules (Part 6/6) for SERVICE EXPRESS contracts from WEB scraped data. Return JSON array of validation results.
+
+**BUSINESS RULES VALIDATION (Part 6 - Tenant Selection):**
+
+"Tenant selection" - Must be present and non-empty
+
+**WEB-SPECIFIC RULES:**
+- Only validate fields that are actually present in the web data
+- Focus on text validation and completeness
+- Skip validation for fields that are not available in web sources
+
+Return format:
+[
+  {
+    "field": "Field name",
+    "value": "Web extracted value",
+    "valid": true or false,
+    "reason": "Validation explanation"
+  }
+]

@@ -1,0 +1,116 @@
+Extract tenant-related information and return in JSON format.
+
+Required fields:
+"Tenant Type" - **CRITICAL LO CONTRACT PATTERN:** Extract tenant business category using specific pattern matching:
+1. **PRIMARY PATTERN FOR LO CONTRACTS**: Look for the word "Type:" followed by space and then the business category value
+   - **SURROUNDING CONTEXT**: This pattern appears in a block that contains:
+     * Line above or nearby: "Unit:" followed by unit code (e.g., "Unit: PG093")
+     * Same area: "Tenant Ref:" followed by numbers
+     * Target line: "Type:" followed by the value to extract
+     * Line below or nearby: "Lease No:" followed by contract number
+   - **EXPECTED FORMAT**: "Type: [PN prefix] [Service/Category name]"
+   - **VALUE FORMAT**: Usually starts with "PN" followed by space and category name
+   - Example extracted value: "PN Service", "PN Health & Beauty", "PN Food Court"
+2. **EXTRACTION METHOD**:
+   - Find the word "Type:" (with colon)
+   - Skip any spaces after the colon
+   - Extract everything until the end of line or next field marker
+   - The extracted value typically follows format: "PN [Category]"
+3. **VALIDATION INDICATORS**:
+   - The "Type:" keyword is preceded by whitespace or start of line
+   - It appears in proximity to "Unit:", "Tenant Ref:", and "Lease No:"
+   - The value after "Type:" starts with "PN" in most cases
+4. **FALLBACK PATTERNS** (if primary not found):
+   - Look for "Business Category:" followed by category
+   - Search for standalone "PN Service", "PN Fashion" etc. in tenant sections
+   - Check quotation or tenant selection pages for business type
+5. **IMPORTANT**: Do NOT hard code specific values. Use the "Type:" keyword and its surrounding context (Unit, Tenant Ref, Lease No) as identifiers
+
+"Tenant selection" - **LO/LR PATTERNS:**
+1. **LO Contracts**: Look for tenant selection approval in:
+   - Tenant selection committee pages
+   - Approval stamps or signatures
+   - "อนุมัติ" or "Approved" markings
+   - Selection committee decisions
+2. **LR Contracts**: Usually "No" (renewal contracts don't need new selection)
+3. Values: "Yes" if approved/stamped, "No" if not found
+
+"Big Tenant" - Put "No" for now
+
+"Space Design Type" - **WEB PATTERNS:** Extract space design classification from tabular data:
+1. Look in "Lease Spaces" section in the space details table
+2. Find "Space Design Type" column in the table with columns like "Space", "NLA", "Space Design Type"
+3. Common values: "PN Local - Health & Beauty", "PN Fashion", "PN Food Court", etc.
+4. Extract the complete value including "PN" prefix and category description
+5. **PDF PATTERNS:** Should match the "Tenant Type" field context for validation consistency
+
+"Billing Options" - Select "Calendar Month" or "Anniversary Month"
+
+"Billing Frequency" - **CRITICAL PATTERN MATCHING FOR LO CONTRACTS**: Extract billing frequency by identifying monthly payment indicators:
+1. **PRIMARY PATTERNS**: Look for monthly payment indicators in payment sections:
+   - "ต่อเดือน" (per month) - most common pattern in Thai contracts
+   - "เดือนละ" (per month) - alternative monthly pattern
+   - "บาทต่อเดือน" (baht per month)
+   - "บาท/เดือน" (baht/month)
+2. **CONTEXT AREAS**: These patterns typically appear in:
+   - Section "4. ค่าเช่าและค่าบริการ" (rent and service charges)
+   - Payment amount lines like "ค่าเช่า [amount] ต่อเดือน"
+   - Service charge lines like "ค่าบริการ [amount] ต่อเดือน"
+3. **EXTRACTION LOGIC**:
+   - If any "ต่อเดือน", "เดือนละ", or "บาท/เดือน" found → return "Monthly"
+   - Look for these patterns in proximity to amount values
+   - Check both rent and service charge sections
+4. **VALIDATION**: Monthly payments are standard for lease contracts
+5. **FALLBACK**: If no clear monthly indicators found, default to "Monthly" for LO contracts
+6. **IMPORTANT**: Use the Thai keywords as context identifiers, not hard-coded values
+
+"Payment Term" - Payment terms
+
+"Monthly rental rate" - **LO/LR PATTERNS:**
+1. **LO Contracts**: Look in quotation or space allocation sections:
+   - "ค่าเช่า" + amount + "บาท/เดือน"
+   - Monthly rental calculations
+   - Price per sqm × total area
+2. **LR Contracts**: Section "4. ค่าเช่าและบริการ"
+3. Extract numeric value only
+
+"Monthly Service Rate" - **LO/LR PATTERNS:**
+1. **LO Contracts**: Look in quotation or service fee sections:
+   - "ค่าบริการ" + amount + "บาท/เดือน"
+   - Common area maintenance fees
+   - Service fee calculations
+2. **LR Contracts**: Section "4. ค่าเช่าและบริการ"
+3. Extract numeric value only
+
+"Rental Deposit" - **LO/LR PATTERNS:**
+1. **LO Contracts**: Look for deposit requirements in:
+   - Quotation deposit sections
+   - Payment terms pages
+   - "เงินประกันการเช่า" + amount + "บาท"
+2. **LR Contracts**: Look for "เงินประกันการเช่าจำนวน" + amount
+3. May also appear as "Security Deposit" or "เงินค้ำประกัน"
+
+"Service Deposit" - **LO/LR PATTERNS:**
+1. **LO Contracts**: Look for service deposit in:
+   - Quotation deposit requirements
+   - Service payment terms
+   - "เงินประกันการบริการ" + amount + "บาท"
+2. **LR Contracts**: Look for "เงินประกันการบริการจำนวน" + amount
+3. May also appear as "Utility Deposit" or "เงินประกันค่าบริการ"
+
+"Tenancy Deposit" - **CALCULATION RULE - ALWAYS COMPUTE FROM SOURCE FIELDS:**
+**PDF PATTERNS:** 
+1. **MANDATORY CALCULATION**: Always calculate as "Total Rent Deposits" + "Total Service Deposits"
+2. **SOURCE FIELDS**: Use the exact values from previously extracted lease terms fields:
+   - "Total Rent Deposits" (from lease_terms extraction)
+   - "Total Service Deposits" (from lease_terms extraction)
+3. **NEVER NULL**: Even if individual components are missing, attempt calculation
+4. **FALLBACK LOGIC**: 
+   - If both "Total Rent Deposits" and "Total Service Deposits" are available → Add them together
+   - If only "Total Rent Deposits" available → Use that value (treat Service as 0)
+   - If only "Total Service Deposits" available → Use that value (treat Rent as 0)
+   - If neither available → Look for "Total Deposit", "เงินประกันรวม", "Total Tenancy Deposit" directly in contract
+5. **FORMAT**: Return as numerical value (e.g., "45234.56")
+**WEB:** Total tenancy deposit amount or sum of individual deposit components
+
+"Rental Ratio" - Rental ratio percentage

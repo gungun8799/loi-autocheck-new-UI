@@ -1,0 +1,99 @@
+Extract tenant-related information and return in JSON format.
+
+**PDF EXTRACTION PATTERNS:**
+Extract data from Thai PDF contract documents with OCR text, handling spaced text and document structure.
+
+Required fields:
+"Tenant Type" - **PDF EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for the word "Type:" followed by space and then the business category value
+2. **SURROUNDING CONTEXT**: This pattern appears in a block that contains:
+   - Line above or nearby: "Unit:" followed by unit code (e.g., "Unit: PG093")
+   - Same area: "Tenant Ref:" followed by numbers
+   - Target line: "Type:" followed by the value to extract
+   - Line below or nearby: "Lease No:" followed by contract number
+3. **VALUE FORMAT**: Usually starts with "PN" followed by space and category name
+4. **EXPECTED VALUES**: "PN Service", "PN Health & Beauty", "PN Food Court", etc.
+5. **SPACED TEXT HANDLING**: Handle OCR spacing in Thai text like "ท า ย p" = "ทายp"
+6. **FALLBACK PATTERNS**: Look for "Business Category:" or standalone "PN Service" patterns
+
+"Tenant selection" - **PDF EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for tenant selection approval in approval sections
+2. **APPROVAL INDICATORS**: Look for "อนุมัติ" or "Approved" markings
+3. **STAMP DETECTION**: Look for approval stamps or signature sections
+4. **COMMITTEE REFERENCES**: Check for tenant selection committee decisions
+5. **VALUES**: "Yes" if approved/stamped, "No" if not found
+6. **SPACED TEXT HANDLING**: Handle spaced Thai text in approval sections
+
+"Big Tenant" - **PDF EXTRACTION PATTERNS:**
+1. **DEFAULT VALUE**: Put "No" for now unless explicitly marked
+2. **PRIMARY PATTERN**: Look for "Big Tenant" or large tenant classifications
+3. **THAI PATTERNS**: Look for "ผู้เช่าใหญ่" or similar classifications
+
+"Space Design Type" - **PDF EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for space design classification in contract sections
+2. **CONTEXT AREAS**: Lease terms sections, space allocation areas
+3. **COMMON VALUES**: "PN Local - Health & Beauty", "PN Fashion", "PN Food Court", etc.
+4. **VALIDATION**: Should match "Tenant Type" field for consistency
+5. **SPACED TEXT HANDLING**: Handle OCR spacing in classification text
+
+"Billing Options" - **PDF EXTRACTION PATTERNS:**
+1. **COMMON VALUES**: "Calendar Month" or "Anniversary Month"
+2. **THAI PATTERNS**: Look for "ปฏิทิน" (calendar) or "ครบรอบ" (anniversary) references
+3. **CONTEXT AREAS**: Billing sections, payment term areas
+
+"Billing Frequency" - **PDF EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERNS**: Look for monthly payment indicators in payment sections:
+   - "ต่อเดือน" (per month) - most common pattern in Thai contracts
+   - "เดือนละ" (per month) - alternative monthly pattern
+   - "บาทต่อเดือน" (baht per month)
+   - "บาท/เดือน" (baht/month)
+2. **CONTEXT AREAS**: Section "4. ค่าเช่าและค่าบริการ" (rent and service charges)
+3. **SPACED TEXT HANDLING**: Handle OCR spacing like "ต่ อ เดื อ น" = "ต่อเดือน"
+4. **EXTRACTION LOGIC**: If any monthly indicators found → return "Monthly"
+5. **FALLBACK**: Default to "Monthly" for lease contracts
+
+"Payment Term" - **PDF EXTRACTION PATTERNS:**
+1. **THAI PATTERNS**: Look for "เงื่อนไขการชำระ", "กำหนดชำระ" (payment conditions)
+2. **CONTEXT AREAS**: Payment sections, terms and conditions
+3. **SPACED TEXT HANDLING**: Handle Thai text spacing in payment terms
+
+"Monthly rental rate" - **PDF EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "ค่าเช่า" followed by amount and "ต่อเดือน"
+2. **CONTEXT AREAS**: Section "4.ค่าเช่าและค่าบริการ" or similar payment sections
+3. **FORMAT HANDLING**: Extract numeric value, preserve decimals, remove commas
+4. **SPACED TEXT HANDLING**: Handle spacing in Thai amount text
+5. **EXAMPLE PATTERN**: "ค่าเช่า 5,308.48 ต่อเดือน" → extract "5308.48"
+
+"Monthly Service Rate" - **PDF EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "ค่าบริการ" followed by amount and "ต่อเดือน"
+2. **CONTEXT AREAS**: Same section as rent amounts (usually "ค่าเช่าและค่าบริการ")
+3. **PROXIMITY**: Often appears immediately after or near the rent amount
+4. **FORMAT HANDLING**: Extract numeric value, preserve decimals, remove commas
+5. **EXAMPLE PATTERN**: "ค่าบริการ 7,962.72 ต่อเดือน" → extract "7962.72"
+
+"Rental Deposit" - **PDF EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "เงินประกันการเช่าจำนวน" followed by amount and "บาท"
+2. **CONTEXT AREAS**: Deposit/guarantee sections of the contract
+3. **FORMAT HANDLING**: Remove commas, preserve decimals
+4. **EXAMPLE**: "เงินประกันการเช่าจำนวน 18,000.00 บาท" → extract "18000.00"
+5. **SPACED TEXT HANDLING**: Handle Thai text spacing in deposit sections
+
+"Service Deposit" - **PDF EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "เงินประกันการบริการจำนวน" followed by amount and "บาท"
+2. **CONTEXT AREAS**: Usually appears after rent deposit in guarantee section
+3. **FORMAT HANDLING**: Remove commas, preserve decimals  
+4. **EXAMPLE**: "เงินประกันการบริการจำนวน 27,000.00 บาท" → extract "27000.00"
+5. **ADDITIONAL PATTERNS**: Handle variations with parenthetical notes
+
+"Tenancy Deposit" - **PDF EXTRACTION PATTERNS:**
+1. **CALCULATION RULE**: Always compute as "Rental Deposit" + "Service Deposit"
+2. **PRIMARY PATTERN**: Look for total deposit calculations in contract
+3. **FALLBACK CALCULATION**: Calculate from individual deposit components if total not found
+4. **FORMAT**: Return as numeric string without thousands separators
+5. **CRITICAL**: This field is essential for deposit validation
+
+"Rental Ratio" - **PDF EXTRACTION PATTERNS:**
+1. **THAI PATTERNS**: Look for "อัตราส่วนค่าเช่า" or rental ratio calculations
+2. **CONTEXT AREAS**: Rental calculation sections, percentage areas
+3. **FORMAT HANDLING**: Extract percentage value, handle Thai percentage formats
+4. **SPACED TEXT HANDLING**: Handle spacing in Thai percentage text

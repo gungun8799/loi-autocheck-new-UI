@@ -1,0 +1,22 @@
+Validate Tenancy Deposit - PART 3 (Local Tenant & Default Rules). Return JSON array.
+
+Extract: Contract Number (LR/LO), Property Type, Brand Name, Net Rent, Service Charge, Tenancy Deposit, Unit/Location Code
+Note: Total Monthly Amount = Net Rent + Service Charge
+
+**CHECK THESE FINAL RULES IN ORDER:**
+
+1. **Local Tenant + Master Cell Rule**:
+   If (LR OR LO) AND tenant has store listed in Master_9_cell.xlsx (check for cell/kiosk codes like "PP11", "K01", "A12", etc.),
+   then deposit MUST be at least 2.00 × (Net Rent + Service Charge)
+   Return: {"field":"Tenancy Deposit","value":"[amount]","valid":true/false,"reason":"Local Tenant with Master Cell = 2 months of total charges required (Rent+Service)"}
+
+2. **Local Tenant + Small Format Rule**:
+   If (LR OR LO) AND tenant is local/small tenant AND Property Type is "Supermarket" OR "GoFresh",
+   then deposit MUST be at least 2.00 × (Net Rent + Service Charge)
+   Return: {"field":"Tenancy Deposit","value":"[amount]","valid":true/false,"reason":"Local Tenant + Small Format = 2 months of total charges required (Rent+Service)"}
+
+3. **DEFAULT RULE** (Always Apply if above don't match):
+   For all other cases, deposit MUST be at least 3.00 × (Net Rent + Service Charge)
+   Return: {"field":"Tenancy Deposit","value":"[amount]","valid":true/false,"reason":"Default Rule = 3 months of total charges required (Rent+Service)"}
+
+**IMPORTANT: This part MUST return valid=true or valid=false, never null**

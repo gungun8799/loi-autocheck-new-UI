@@ -1,0 +1,17 @@
+Validate business rules (Part 3/5) and return JSON array of validation results.
+
+Validation Rules (Part 3 - Utility and Tenant Selection):
+
+"Include Utility" - Valid if value == "Yes" or "No". If null/empty: invalid "Include Utility is missing". If not "Yes" or "No": invalid "Include Utility ('<value>') must be 'Yes' or 'No'". Else valid "Include Utility is '<value>'"
+
+"Tenant selection" - Valid if non-null. If null/empty: invalid "Tenant selection is missing", else valid "Tenant selection present"
+
+Return format:
+[
+  {
+    "field": "Field name", 
+    "value": "Extracted value (or null)",
+    "valid": true or false,
+    "reason": "Explanation"
+  }
+]

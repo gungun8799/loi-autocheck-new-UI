@@ -1,0 +1,23 @@
+Extract utility information from WEB scraped data and return in JSON format.
+
+**NOTE:** Service Express contracts typically have simplified utility structures compared to Permanent Fixed contracts.
+
+Required fields:
+"Include Utility" - **CALCULATION LOGIC:** Output "Yes" or "No". Return "Yes" if any of "Utilities charge (water)", "Utilities charge (Electricity)", "Utilities charge (cooking gas)" has non-zero value. Return "No" if all are 0.00 or missing.
+
+"Utilities charge (water)" - **WEB PATTERNS:** Look for water utility rates in web form fields or utility meter sections. Check "Meter Type" column for water meters and extract rate from "Tariff as at Contract Start Date" column. If nothing found, put 0.00
+
+"Utilities charge (Electricity)" - **WEB PATTERNS:** Look for electricity utility rates in web form fields or utility meter sections. Check "Meter Type" column for electricity meters and extract rate from "Tariff as at Contract Start Date" column. If nothing found, put 0.00
+
+"Utilities charge (cooking gas)" - **WEB PATTERNS:** Look for cooking gas utility rates in web form fields or utility meter sections. Check "Meter Type" column for gas meters and extract rate from "Tariff as at Contract Start Date" column. If nothing found, put 0.00
+
+**WEB EXTRACTION NOTES:**
+- Service Express may have different utility presentation than Permanent Fixed
+- Look for utility rate tables or meter configuration sections
+- Extract numeric rates from tariff columns
+- Some Service Express contracts may not include certain utilities
+
+**CALCULATION RULES:**
+- Extract all three utility charge values first
+- If any of the three utility charges is non-zero, return "Include Utility" as "Yes"
+- If all three are exactly 0.00 (or missing), return "Include Utility" as "No"

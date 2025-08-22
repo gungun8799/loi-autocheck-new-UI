@@ -1,0 +1,46 @@
+Extract utility information from PDF text and return ONE JSON object.
+
+NOTE: Service Express and Permanent Fixed may format utilities differently; rules below apply to both.
+
+NORMALIZE
+- Convert Thai digits ๐–๙ → 0–9.
+- Unify decimal separators ("," or "．" → "."); remove thousands separators.
+- Collapse extra spaces/line breaks; match case/space-insensitively.
+
+UTILITY ANCHORS
+- Water: (ค่าน้ำ|ค่าน้ำประปา)
+- Electricity: (ค่าไฟฟ้า)
+- Cooking gas: (ค่าก๊าซหุงต้ม|ก๊าซหุงต้ม|LPG)
+
+RATE PHRASES (must be present on same line or next line)
+- (อัตรา|ยูนิตละ|ต่อยูนิต|ต่อหน่วย|บาท/หน่วย|บาทต่อหน่วย|ลูกบาศก์เมตรละ)
+
+EXTRACTION (apply per utility)
+- From the utility anchor, search the same line or the next line for the nearest RATE PHRASE, then capture the first number BEFORE the next “บาท”.
+- If text explicitly states no charge (e.g., “0”, “0.00”, “ไม่คิด”, “ฟรี”, “ไม่มีการคิดค่า…”) → value = 0.00.
+- If no valid number is found → value = 0.00.
+- Ignore amounts unrelated to unit rates (deposits, PABX, penalties, rents, service charges).
+
+FIELDS (always output; numbers with two decimals)
+- "Utilities charge (water)"
+- "Utilities charge (Electricity)"
+- "Utilities charge (cooking gas)"
+
+STRICT INCLUDE LOGIC (override-safe)
+- Let w = water || 0, e = electricity || 0, g = cooking_gas || 0.
+- Define tiny = 0.000001 (floating tolerance).
+- If (w <= tiny AND e <= tiny AND g <= tiny) → "Include Utility" = "No".
+- Else → "Include Utility" = "Yes".
+- Never set "Include Utility" from narrative mentions like “ได้รวมค่าสาธารณูปโภค/ยังไม่รวมค่าสาธารณูปโภค”; ONLY the three numeric rates decide.
+
+OUTPUT FORMAT
+{
+  "Include Utility": "Yes" | "No",
+  "Utilities charge (water)": 0.00,
+  "Utilities charge (Electricity)": 0.00,
+  "Utilities charge (cooking gas)": 0.00
+}
+
+EXAMPLE (should yield "Include Utility" = "No"):
+- “คิดค่าไฟฟ้าในอัตรา ยูนิตละ 0.00 บาท … คิดค่าน้ำประปา … 0.00 บาท” and no gas line
+  → water=0.00, electricity=0.00, cooking_gas=0.00, Include Utility="No".

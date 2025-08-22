@@ -1,0 +1,44 @@
+Extract service charge information from WEB scraped data and return in JSON format.
+
+**NOTE:** Service Express contracts have limited service charges compared to Permanent Fixed contracts.
+
+**CRITICAL RULE:** If "Other service charge before tax (in the renting space)" is "0" or "0.00", then ALL of the following fields MUST return null/empty:
+  - "Other service charge (in the renting space) Charge description"
+  - "Other service charge (in the renting space) start date"
+  - "Other service charge (in the renting space) end date"
+
+Required fields:
+"Other service charge before tax (in the renting space)" - 
+**WEB PATTERNS:** Look in "Other Monthly Charges" section for "Cool Air Service Fee" (WITHOUT "Common Area" prefix). This is the renting space charge. Extract the "Monthly Amount" value. If not found, return 0.00.
+1. Look only in "Other Monthly Charges".
+2. Find row where Charge Type or Description = "Cool Air Service Fee" (case-insensitive in the renting space).
+3. If no such row or table is empty, return empty.
+4. Ignore all other sections and charges.
+
+"Other service charge (in the renting space) Charge description" - 
+**WEB PATTERNS:** 
+1. Search only in "Other Monthly Charges".
+2. If Charge Type/Description = "Cool Air Service Fee" (case-insensitive), return its Charge Description.
+3. **CRITICAL:** If "Other service charge before tax (in the renting space)" is "0" or "0.00", MUST return null/empty.
+4. If no match or table empty, return empty.
+5. Ignore all other sections/charges.
+
+"Other service charge (in the renting space) start date" - 
+**WEB PATTERNS:** For "Cool Air Service Fee" row, extract the "Applicable Start Date" value. Format as YYYY-MM-DD. **CRITICAL:** If "Other service charge before tax (in the renting space)" is "0" or "0.00", MUST return null.
+
+"Other service charge (in the renting space) end date" - 
+**WEB PATTERNS:** For "Cool Air Service Fee" row, extract the "Applicable End Date" value. Format as YYYY-MM-DD. **CRITICAL:** If "Other service charge before tax (in the renting space)" is "0" or "0.00", MUST return null.
+
+"Other service charge before tax (public space)" - If cannot find anything, response empty
+
+"Other service charge (public space) Charge description" - Description for public space charges
+
+"Other service charge (public space) start date" - Start date for public space charges
+
+"Other service charge (public space) end date" - End date for public space charges
+
+**WEB-SPECIFIC NOTES:**
+- Web interface typically shows service charges in tabular format
+- Look for "Monthly Charges" sections or similar
+- Service Express contracts may have fewer service charges than Permanent Fixed
+- Extract dates in web-friendly formats (YYYY-MM-DD)

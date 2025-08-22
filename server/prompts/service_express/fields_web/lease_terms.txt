@@ -1,0 +1,71 @@
+Extract lease terms for SERVICE EXPRESS contracts from WEB scraped data and return as a complete JSON object with ALL required fields listed below.
+
+**INTELLIGENT YEAR ALLOCATION LOGIC FOR WEB SOURCES:**
+
+* Use "Proposed lease commencement date" and "Proposed lease expiry date" to calculate total duration
+* Divide total lease duration into equal 1-year periods
+* Calculate year boundaries intelligently:
+
+  * Year 1: Start = Proposed commencement date, End = Start date + 11 months + 30 days
+  * Year 2: Start = Year 1 End date + 1 day, End = Start date + 11 months + 30 days
+  * Year 3: Start = Year 2 End date + 1 day, End = Proposed expiry date (or calculated)
+* If the web data lists explicit year ranges (e.g., “Applicable Start Date/End Date” in Monthly Charge / Rental Schedule sections), use those exact dates for the corresponding year instead of calculating.
+
+**DYNAMIC YEAR INCLUSION:**
+
+* Only include years that actually exist in the contract duration
+* If lease is 2 years total, only show Year 1 and Year 2
+* If lease is 1 year total, only show Year 1
+* Do NOT include Year 3 unless contract actually spans 3+ years
+
+Required fields:
+
+"Lease Type" - **SERVICE EXPRESS CONTRACT**: Always return "Service Express" for service express contracts
+
+"Lease property tax rate" - **WEB EXTRACTION PATTERNS:**
+
+1. **PRIMARY PATTERN**: Look for "LEASE PROPERTY TAX:" followed by the actual value in the data
+2. **SECONDARY PATTERN**: Look for "Lease Property Tax" fields in rental schedule or terms section
+3. **VALUE EXTRACTION**:
+
+   * Extract the exact value as shown in the data (e.g., "PTS - PT Standard", "PT Mall", "10.00", "12.50")
+   * If the field is empty or not found, return null
+   * Do NOT convert text values to numbers unless the data itself shows a number
+4. **FORMAT**: Return exactly as shown in the source data
+
+"Monthly charge" - **WEB EXTRACTION PATTERNS:**
+
+1. **PRIMARY PATTERN**: Look for "Monthly Charges:" followed by "Yes" or "No"
+2. **CONTEXT**: Usually appears near monthly charges configuration
+3. **LOGIC**: If monthly charges are configured/enabled in web interface → "Yes", otherwise → "No"
+
+**YEAR-BY-YEAR FINANCIAL TERMS (calculated from web rental schedule):**
+
+* For each year, match by date range: use the row whose **Applicable Start Date** and **Applicable End Date** match the year’s period.
+* Prefer rows whose **Charge Type** exactly matches the target (“Fixed Rent” for rent, “Service Charge - Fixed” for service).
+* When both “Monthly Amount” and “Tax Included:” are present, use **Monthly Amount**; if only “Tax Included:” exists, use that number.
+* **Do NOT** use “Total Amount Including Tax”, “Tax Amount”, PSMPM rates, or global “Monthly Amount of Charges” summaries (e.g., Lease Year = 0 or unrelated summaries).
+
+"Year 1: Period start date" - Start date of Year 1 (Proposed lease commencement date, or explicit start date if provided)
+"Year 1: Period end date" - End date of Year 1 (calculated: start + 11 months + 30 days, or explicit end date if provided)
+"Year 1 : Monthly Amount of Rent" – Extract the correct rent amount for Year 1 as follows:
+1. Look under the "Rental Schedule" section. 
+   - Use the value from the **Gross Rent (p.m.)** column for Year 1 (this is the actual monthly rent).  
+2. If Gross Rent (p.m.) is not available, then use the value shown immediately after **"Tax Included:"**.  
+3. Do NOT use "Net Rent (p.m.)" if it shows 0.00.  
+4. Return only the numeric rent amount (e.g., 5000.00).
+"Year 1 : Monthly Amount of service" - Extract from the **Service Charge - Fixed** row for Year 1 (use “Monthly Amount”; else use value after “Tax Included:”)
+
+"Year 2: Period start date" - Start date of Year 2 (if applicable)
+"Year 2: Period end date" - End date of Year 2 (if applicable)
+"Year 2 : Monthly Amount of rent" - Extract from the **Fixed Rent** row for Year 2 (if applicable)
+"Year 2 : Monthly Amount of service" - Extract from the **Service Charge - Fixed** row for Year 2 (if applicable)
+
+"Year 3: Period start date" - Start date of Year 3 (if applicable)
+"Year 3: Period end date" - End date of Year 3 (if applicable)
+"Year 3 : Monthly Amount of rent" - Extract from the **Fixed Rent** row for Year 3 (if applicable)
+"Year 3 : Monthly Amount of service" - Extract from the **Service Charge - Fixed** row for Year 3 (if applicable)
+
+**DEPOSIT TERMS (from web deposit fields):**
+"Total Rent Deposits" - Extract rental deposit amount from deposit section
+"Total Service Deposits" - Extract service deposit amount from deposit section

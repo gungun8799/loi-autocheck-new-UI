@@ -1,0 +1,92 @@
+Extract tenant-related information and return in JSON format.
+
+**WEB EXTRACTION PATTERNS:**
+Extract data from HTML form fields, table cells, and structured web elements.
+
+Required fields:
+"Tenant Type" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Tenant Type:" (case insensitive) followed by the business category
+2. **TABLE PATTERN**: Find in tenant details tables under "Type" or "Business Category" columns
+3. **FORM PATTERN**: Look for tenant type in form fields or dropdown selections
+4. **VALUE FORMAT**: Usually starts with "PN" followed by category name (e.g., "PN Service", "PN Health & Beauty")
+5. **CONTEXT AREAS**: Tenant information sections, business classification tables
+6. **LABEL VARIATIONS**: "Business Category:", "Type:", "Tenant Classification"
+
+"Tenant selection" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Tenant selection:" followed by approval status
+2. **FORM PATTERN**: Look for tenant selection status in form checkboxes or dropdown fields
+3. **TABLE PATTERN**: Find approval indicators in tenant approval tables
+4. **VALUES**: "Yes" if approved/selected, "No" if not found or declined
+5. **CONTEXT AREAS**: Tenant approval sections, selection status tables
+
+"Big Tenant" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Big Tenant:" followed by Yes/No indicator
+2. **DEFAULT VALUE**: Put "No" for now unless explicitly marked as "Yes"
+3. **FORM PATTERN**: Look for big tenant classification in form fields
+
+"Space Design Type" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Space Design Type:" (case insensitive) followed by the classification
+2. **TABLE PATTERN**: Find in "Lease Spaces" section under "Space Design Type" column
+3. **FORM PATTERN**: Look for space design type in form fields or selection elements
+4. **COMMON VALUES**: "PN Local - Health & Beauty", "PN Fashion", "PN Food Court", "PN Service", etc.
+5. **CONTEXT AREAS**: Space details tables with columns like "Space", "NLA", "Space Design Type"
+6. Extract the complete value including "PN" prefix and category description
+
+"Billing Options" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Billing Options:" followed by the option type
+2. **COMMON VALUES**: "Calendar Month" or "Anniversary Month"
+3. **FORM PATTERN**: Look for billing options in form fields or dropdown selections
+4. **TABLE PATTERN**: Find in billing configuration tables
+
+"Billing Frequency" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Billing Frequency:" (case insensitive) followed immediately by the frequency word
+2. **TABLE PATTERN**: Find in billing details tables under "Frequency" or "Billing" columns  
+3. **FORM PATTERN**: Look for billing frequency in form fields or dropdown selections
+4. **COMMON VALUES**: "Monthly", "Quarterly", "Annual", "รายเดือน", "รายไตรมาส", "รายปี"
+5. **CONTEXT AREAS**: Payment sections, billing information tables
+
+"Payment Term" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Payment Term:" followed by the payment terms
+2. **FORM PATTERN**: Look for payment terms in form fields or text areas
+3. **TABLE PATTERN**: Find in payment details tables
+
+"Monthly rental rate" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Monthly rental rate:" followed by the amount
+2. **TABLE PATTERN**: Find in rental details tables under "Rental Rate" or "Monthly Rent" columns
+3. **FORM PATTERN**: Look for monthly rental amounts in form fields
+4. **UNIT HANDLING**: Extract numeric value, handle currency symbols and formatting
+5. **CONTEXT AREAS**: Rental information sections, payment tables
+
+"Monthly Service Rate" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Monthly Service Rate:" followed by the amount
+2. **TABLE PATTERN**: Find in service fee tables under "Service Rate" or "Monthly Service" columns
+3. **FORM PATTERN**: Look for monthly service amounts in form fields
+4. **UNIT HANDLING**: Extract numeric value, handle currency symbols and formatting
+5. **CONTEXT AREAS**: Service fee sections, payment tables
+
+"Rental Deposit" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Rental Deposit:" followed by the deposit amount
+2. **TABLE PATTERN**: Find in deposit tables under "Rental Deposit" columns
+3. **FORM PATTERN**: Look for rental deposit amounts in form fields
+4. **LABEL VARIATIONS**: "Security Deposit", "เงินประกันการเช่า"
+5. **UNIT HANDLING**: Extract numeric value, handle currency formatting
+
+"Service Deposit" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Service Deposit:" followed by the deposit amount
+2. **TABLE PATTERN**: Find in deposit tables under "Service Deposit" columns
+3. **FORM PATTERN**: Look for service deposit amounts in form fields
+4. **LABEL VARIATIONS**: "Utility Deposit", "เงินประกันการบริการ"
+5. **UNIT HANDLING**: Extract numeric value, handle currency formatting
+
+"Tenancy Deposit" - **WEB EXTRACTION PATTERNS:**
+1. **CALCULATION RULE**: Always compute as "Rental Deposit" + "Service Deposit"
+2. **PRIMARY PATTERN**: Look for "Tenancy Deposit:" or "Total Deposit:" followed by the total amount
+3. **TABLE PATTERN**: Find calculated total deposit in deposit summary tables
+4. **FALLBACK CALCULATION**: If not found directly, calculate from individual deposit components
+5. **FORMAT**: Return as numerical value (e.g., "45234.56")
+
+"Rental Ratio" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Rental Ratio:" followed by the percentage
+2. **TABLE PATTERN**: Find in rental calculation tables under "Ratio" columns
+3. **FORM PATTERN**: Look for rental ratio in form fields
+4. **UNIT HANDLING**: Extract percentage value, handle % symbols

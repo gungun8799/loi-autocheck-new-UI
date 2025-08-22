@@ -1,0 +1,98 @@
+Extract basic contract information for PERMANENT FIXED contracts and return in JSON format. Focus on accuracy and extract only what is clearly visible.
+
+**WEB EXTRACTION PATTERNS:**
+Extract data from HTML form fields, table cells, and structured web elements.
+
+Required fields:
+"Building Name" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Building Name:" (case insensitive) followed immediately by the building name
+2. **TABLE PATTERN**: Find in property details tables under "Building Name" column or cell
+3. **FORM PATTERN**: Look for building name in form fields or input values
+4. **CONTEXT AREAS**: Property information sections, lease details tables
+5. Extract only the building name part, exclude any ID numbers in parentheses
+
+"Building ID" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Building ID:" (case insensitive) followed by the 4-digit ID
+2. **TABLE PATTERN**: Find in property details tables under "Building ID" column
+3. **FALLBACK**: Extract from building name if ID appears in parentheses (e.g., "(5009)")
+4. Extract 4-digit numeric code only
+
+"อยู่กองทรัสต์หรือไม่" - If "Building ID"  starts with "00" put "Yes", otherwise "No"
+
+"แบบสัญญากองทรัสต์" - If "อยู่กองทรัสต์หรือไม่" is "Yes", contract must contain "ทรัสต์เพื่อการลงทุน" or similar phrase to be valid, otherwise always valid
+
+"Contract Number" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Contract Number:" (case insensitive) followed by the contract number
+2. **FORM PATTERN**: Look for contract number in form fields with labels like "Contract No.", "เลขที่สัญญา"
+3. **TABLE PATTERN**: Find in contract details tables
+4. **FORMAT DETECTION**: Look for "xxxx_LOxxxx_xxxxx" or "xxxx_LRxxxx_xxxxx" patterns
+5. Extract complete contract number including underscores and special characters
+
+"Brand Name" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Brand Name:" (case insensitive) followed by the brand name
+2. **FORM PATTERN**: Look for brand name in form fields or input values
+3. **TABLE PATTERN**: Find in tenant details tables under brand/business name columns
+4. **LABEL VARIATIONS**: "ชื่อร้าน", "แบรนด์", "Shop Name", "Business Name"
+5. Extract complete brand/business name
+
+"Property Type" - **LO/LR PATTERNS**: Extract property category:
+1. **LO Contracts**: Look in quotation details or tenant selection pages
+2. **LR Contracts**: Usually in contract terms section
+3. Common values: "Hypermarket", "Go Fresh", "Community Mall", "Fashion", "Food Court"
+
+"Customer Name" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Customer Name:" (case insensitive) followed by the full name
+2. **FORM PATTERN**: Look for customer name in form fields or input values
+3. **TABLE PATTERN**: Find in customer details tables
+4. **INDIVIDUAL PATTERNS**: Names with titles "นาย", "นาง", "นางสาว" + full name
+5. **CORPORATE PATTERNS**: Company names with "บริษัท", "จำกัด", "Co., Ltd."
+6. **LABEL VARIATIONS**: "ผู้เช่า", "Tenant Name", "Lessee Name"
+7. Extract complete name including titles and business identifiers
+
+"Customer Address" - **LO/LR PATTERNS**:
+1. **LO Contracts**: Look for address in:
+   - Individual ID sections
+   - Company registration sections
+   - Quotation delivery address
+2. **LR Contracts**: Usually follows customer name in contract
+3. Extract complete address including sub-district, district, province, postal code
+
+"Individual or Corporate" - Analyze Customer Name: if clearly a person's name (given name + surname, no business identifiers) = "Individual"; if contains business terms like "Co.", "Ltd.", "Inc.", "Corporation" = "Corporate"; if uncertain = "—"
+
+"แนบหนังสือรับรองบริษัท" - If "Individual or Corporate" is "Corporate", check if PDF includes corporate certificate document or "หนังสือรับรองความเป็นนิติบุคคล": present = "Yes", not present = "No". If "Individual" = mark as valid with reason "Individual customer"
+
+"Unit ID" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Unit ID:" (case insensitive) followed by the unit identifier
+2. **TABLE PATTERN**: Find in space details tables under "Unit ID" or "Unit" columns
+3. **FORM PATTERN**: Look for unit ID in form fields
+4. **FORMAT DETECTION**: Look for "PXXXX" format where X represents numbers (e.g., "P2027", "P1234")
+5. **LABEL VARIATIONS**: "หน่วย", "Unit", "Space ID"
+6. Extract complete unit identifier
+
+"Space (NLA)" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Space (NLA):" or "NLA:" (case insensitive) followed by the area
+2. **TABLE PATTERN**: Find in space details tables under "Space", "NLA", or "Area" columns
+3. **UNIT PATTERNS**: Look for values followed by "ตารางเมตร", "ตร.ม.", "sq.m.", "sqm"
+4. **FORM PATTERN**: Look for space area in form fields
+5. **LABEL VARIATIONS**: "พื้นที่", "Area", "Space Size"
+6. Extract numerical value only (e.g., "50.5" from "50.5 ตร.ม.")
+
+"Proposed lease commencement date" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Proposed lease commencement date:" (case insensitive) followed by the date
+2. **FORM PATTERN**: Look for commencement date in date input fields or form elements
+3. **TABLE PATTERN**: Find in lease details tables under date columns
+4. **LABEL VARIATIONS**: "วันที่เริ่มต้น", "เริ่มสัญญา", "Commencement Date", "Start Date", "Lease Start"
+5. **DATE FORMAT HANDLING**: Handle multiple date formats (DD/MM/YYYY, YYYY-MM-DD, Thai dates)
+6. **CALENDAR CONVERSION**: Convert Buddhist year to Gregorian (subtract 543) if needed
+7. **OUTPUT FORMAT**: YYYY-MM-DD
+
+**DERIVED FINANCIAL FIELDS (computed from lease terms data):**
+"Monthly Rental Rate" - Extract from Year 1 Monthly Amount of rent or monthly rent value
+"Monthly Service Rate" - Extract from Year 1 Monthly Amount of service or monthly service value  
+"Rental Deposit" - Extract from Total Rent Deposits value
+"Service Deposit" - Extract from Total Service Deposits value
+"Net Rent (p.m.)" - Use Monthly Rental Rate value
+"Lease Type" - **FIXED VALUE**: Always "Permanent Fixed" for permanent_fixed contract processing. DO NOT extract from document. Ignore "Type: PN Service" or similar patterns - those are Tenant Type, not Lease Type
+"Tenant Type" - Extract from Property Type or business category description
+
+"Proposed lease expiry date" - End date of lease

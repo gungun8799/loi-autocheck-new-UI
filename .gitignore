@@ -1,0 +1,61 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# testing
+/coverage
+
+# production
+/build
+
+# misc
+.DS_Store
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# SECURITY: Environment and credential files
+.env
+.env.*
+server/.env
+server/.env.*
+
+# SECURITY: Firebase service account keys  
+server/*firebase*.json
+server/loi-checker-firebase-adminsdk-*.json
+loi-checker-firebase-adminsdk-*.json
+*firebase-adminsdk*.json
+
+# SECURITY: Google Cloud service account keys
+server/*service-account*.json
+server/gen-lang-client-*.json
+*service-account*.json
+server/tidc-internal-*.json
+tidc-internal-*.json
+*-service-account*.json
+server/*-*-*.json
+
+# Server uploads and temporary files
+server/uploads/
+server/contracts/
+server/processed/
+server/debug-*.js
+server/test-*.js
+server/*raw_text*
+server/*.txt
+server/*.xlsx
+
+# IDE and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

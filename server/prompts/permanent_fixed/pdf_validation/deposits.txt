@@ -1,0 +1,46 @@
+Validate Tenancy Deposit for PERMANENT FIXED contracts. Return JSON array of validation results.
+
+**CRITICAL**: Extract these values from the data:
+- Contract Number (to determine LR/LO type)
+- Property Type (Hypermarket, Value, Department, Supermarket, GoFresh, etc.)
+- Brand Name (check for ATM-SCB, ATM-KBANK, etc.)
+- Net Rent Amount (monthly rental amount)
+- Tenancy Deposit Amount (total deposit collected)
+
+**DEPOSIT VALIDATION RULES:**
+
+1. **LR + Big Tenant Rule**: 
+   If contract starts with "LR" AND Property Type is listed as big tenant (check if mentioned as major/anchor tenant), 
+   then deposit MUST equal 3.00 × Net Rent
+
+2. **LO + Non-Qualified + Major Property Rule**:
+   If contract starts with "LO" AND tenant is not pre-qualified AND Property Type is "Hypermarket" OR "Value" OR "Department",
+   then deposit MUST equal 4.00 × Net Rent
+
+3. **Local Tenant + Master Cell Rule**:
+   If (LR OR LO) AND tenant is identified as local/small tenant with specific cell location,
+   then deposit MUST equal 2.00 × Net Rent
+
+4. **Local Tenant + Small Format Rule**:
+   If (LR OR LO) AND local tenant AND Property Type is "Supermarket" OR "GoFresh",
+   then deposit MUST equal 2.00 × Net Rent
+
+5. **ATM-SCB GoFresh Exception**:
+   If Brand Name is "ATM SCB" AND Property Type is "GoFresh",
+   then deposit requirement = 0.00 (no deposit required)
+
+6. **Other ATM GoFresh Rule**:
+   If Brand Name is NOT "ATM SCB" AND NOT "ATM KBANK" AND Property Type is "GoFresh",
+   then deposit MUST equal 1.00 × Net Rent
+
+**DEFAULT RULE**: If none of the above apply, deposit MUST equal 3.00 × Net Rent
+
+Return format:
+[
+  {
+    "field": "Tenancy Deposit",
+    "value": "extracted_amount",
+    "valid": true/false,
+    "reason": "Applied rule: [specific rule] - Expected X months (amount), Found: Y"
+  }
+]

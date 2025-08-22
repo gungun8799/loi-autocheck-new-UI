@@ -1,0 +1,68 @@
+Extract signature information from PDF data and return in JSON format. If a signature line is present, return true; if no signature line at all, return false. For printed names, if missing, return null.
+
+Extract these fields as one JSON:
+"CP Axtra signee 1 (has signature or not)"
+"CP Axtra signee 1 (name of the signed person)"
+"CP Axtra witness (has signature or not)"
+"CP Axtra witness (name of the signed person)"
+"Customer signee 1 (has signature or not)"
+"Customer signee 1 (name of the signed person)"
+"Customer witness (has signature or not)"
+"Customer witness (name of the signed person)"
+
+NORMALIZE
+- Remove zero-widths. Collapse intra-word spaces (ล ง ชื่ อ→ลงชื่อ, พ ย า น→พยาน).
+- Replace runs of . _ - • … with token FILLER. Matching is case/space-insensitive.
+
+ANCHORS & CUES
+- CP Axtra header: line containing {บริษัท, ซีพี, (เอ็กซ์ตร้า|แอ็กซ์ตร้า), จำกัด}.
+- Role cues: ผู้ให้บริการ (CP Axtra), ผู้รับบริการ (Customer).
+- Signature cue: ลงชื่อ or โดย. Witness cue: พยาน.
+
+WINDOW RULES
+- A “block window” starts at a signature cue and includes the same line + next 2 lines, stopping before any of {ลงชื่อ, โดย, พยาน, ผู้ให้บริการ, ผู้รับบริการ}.
+- Signature present: if the window has only FILLER/blank → "No"; else → "Yes".
+- Name extraction: nearest (...) inside the window → text inside. If none → NULL.
+
+SIGNEE NAME PAIRING (to disambiguate sides)
+1) Find the first occurrence of ผู้ให้บริการ and the first occurrence of พยาน **after it**. 
+   The text between these two markers is the **SIGNEE REGION** (usually contains two printed names in parentheses).
+2) In the same page, detect the **Customer header name**: the Thai name (may include honorific นาย/นาง/นางสาว/น.ส./คุณ) that appears near ผู้รับบริการ (often a non-parenthesized name above its parentheses version).
+3) In the SIGNEE REGION, collect up to two parenthesized names.
+   - If one equals the Customer header name → that one = "Customer signee 1 (name…)".
+   - The **other** parenthesized name in the region = "CP Axtra signee 1 (name…)".
+   - If only one parenthesized name exists in the region and it equals the Customer header name, then the CP Axtra signee name is the **nearest other Thai name** in the region that starts with an honorific (นาย|นาง|นางสาว|น.ส.|คุณ). 
+   - If still none, take the **longest Thai name span (2–4 tokens)** nearest to ผู้ให้บริการ within the region.
+   → **Guarantee:** "CP Axtra signee 1 (name…)" must never be empty.
+
+FIELD RULES
+
+"CP Axtra signee 1 (has signature or not)"
+- On the CP Axtra side (near ผู้ให้บริการ), use the first signature cue; apply Signature present rule.
+
+"CP Axtra signee 1 (name of the signed person)"
+- Use SIGNEE NAME PAIRING result (never empty). Output without parentheses.
+
+"CP Axtra witness (has signature or not)"
+- After the SIGNEE REGION, find the next signature cue with พยาน on same/next line (still CP Axtra side). Apply Signature present rule.
+
+"CP Axtra witness (name of the signed person)"
+- From that witness window, extract nearest (...) name; else NULL. Do not reuse the Customer witness name.
+
+"Customer signee 1 (has signature or not)"
+- Near ผู้รับบริการ, first signature cue; apply Signature present rule.
+- If "Customer signee 1 (name…)" ≠ NULL → this must be "Yes"; else "No".
+
+"Customer signee 1 (name of the signed person)"
+- Prefer the Customer header name (non-parenthesized). If a matching (...) exists directly under the signee cue, use that; else keep the header name. Never empty.
+
+"Customer witness (has signature or not)"
+- After customer signee, next signature cue with พยาน; apply Signature present rule.
+- If "Customer witness (name…)" ≠ NULL → must be "Yes"; else "No".
+
+"Customer witness (name of the signed person)"
+- From the customer witness window, extract nearest (...) name; else NULL.
+- Do not borrow names from the CP Axtra side.
+
+OUTPUT
+- One JSON object with the 8 keys above. Trim whitespace; names without parentheses.

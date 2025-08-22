@@ -1,0 +1,75 @@
+Extract service charge information from Thai PDF text (OCR) and return JSON.
+
+GOAL
+- Separate **public/common area** charges from **in the renting space** charges.
+- Do NOT confuse clause-wide base fees or contract-period dates with “in the renting space” charges.
+
+GENERAL RULES
+- Amounts must be numeric strings with two decimals (e.g., "4500.00").
+- Dates: return exactly as printed near the charge line (Thai or English month); only attach to the charge they belong to.
+- If a field is not evidenced per rules below, return "0.00" for amounts and null for description/start/end dates.
+
+KEY INDICATORS
+- **Public/common area indicators:** "พื้นที่ส่วนกลาง", "ค่าบริการพิเศษสำหรับไอเย็น", 
+  "ค่าบริการพิเศษสําหรับไอเย็นและไฟฟ้า(พื้นที่ส่วนกลาง)", "Common Area", "Public space".
+- **In-renting-space indicators (must be explicit):** "ในพื้นที่เช่า", "เฉพาะพื้นที่เช่า", "ในเขตร้าน/บูธ",
+  "ภายในพื้นที่เช่า", "เฉพาะผู้เช่า", or equivalent phrases clearly limiting to tenant’s own space.
+
+CO-LOCATION / EVIDENCE BUNDLE (STRICT)
+- To record **in the renting space**:
+  - You must find an explicit in-renting-space indicator **AND** its amount phrase (e.g., "เดือนละ <amount> บาท")
+  - on the **same line or within ±1 line**.
+  - Only then may you extract a charge description and dates for that same charge.
+  - If this bundle is not satisfied → treat as **not present**.
+- Dates for any charge must be on the **same line or within ±1 line** of that specific charge line 
+  (e.g., "ตั้งแต่วันที่ <date>" / "จนถึงวันที่ <date>"). 
+  If dates only appear tied to the overall contract or other clauses, do **not** attach them.
+
+NEGATIVE FILTERS (DO NOT USE as in-renting-space evidence)
+- Clause-wide or base fees such as:
+  - Lines referencing **ข้อ 1 / ข้อ 2** base service fee (e.g., "ค่าบริการตามข้อ 1", "อัตราเดือนละ … บาท"),
+  - Contract period dates unrelated to a specific surcharge line,
+  - Utility rate statements ("คิดค่าไฟฟ้า ... บาท/ยูนิต", "ค่าน้ำ ... บาท/ลบ.ม."),
+  - Deposits, guarantees, phone/PABX connection fees, transfer fees, or penalties,
+  - Generic statements like "ได้รวม/ยังไม่รวมค่าสาธารณูปโภค" without a specific surcharge line.
+- If the only evidence is common-area wording (no in-space indicator) → **do not** populate in-space fields.
+
+MAPPING RULES
+- "Common Area Cool Air Service Fee" and any common-area surcharges → map to **public space** fields only.
+- Populate **in-renting-space** fields **only** when the strict evidence bundle is met.
+- **Ambiguity rule:** if indicator and amount are not co-located (same or ±1 line), treat as **absent**.
+
+REQUIRED FIELDS
+1) "Other service charge before tax (in the renting space)"
+   - Find an in-renting-space evidence bundle. Extract "<amount>" from patterns like 
+     "เดือนละ <amount> บาท" (accept Thai digits and thousand separators).
+   - If no qualifying bundle, return "0.00".
+
+2) "Other service charge (in the renting space) Charge description"
+   - Only if (1) > "0.00". Use the text segment describing that exact charge line; else null.
+
+3) "Other service charge (in the renting space) start date"
+   - Only if (1) > "0.00" and a "ตั้งแต่วันที่ <date>" is co-located (same/±1 line) with that charge; else null.
+
+4) "Other service charge (in the renting space) end date"
+   - Only if (1) > "0.00" and a "จนถึงวันที่ <date>" is co-located (same/±1 line) with that charge; else null.
+
+5) "Other service charge before tax (public space)"
+   - From common-area indicators. Extract the amount if present; else "0.00".
+
+6) "Other service charge (public space) Charge description"
+   - Description tied to the common-area charge; else null.
+
+7) "Other service charge (public space) start date"
+   - Only if a start date is printed for that common-area charge (same/±1 line); else null.
+
+8) "Other service charge (public space) end date"
+   - Only if an end date is printed for that common-area charge (same/±1 line); else null.
+
+POST-CONSTRAINT
+- If "Other service charge before tax (in the renting space)" = "0.00", then the three in-space fields 
+  (description/start/end) must all be **null**.
+- Never copy amounts/dates from clause-wide base fees or overall contract period.
+
+OUTPUT
+- Return only the JSON object with the exact keys above, amounts as strings with two decimals, and nulls as needed.

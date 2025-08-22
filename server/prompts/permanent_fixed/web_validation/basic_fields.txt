@@ -1,0 +1,35 @@
+Validate basic contract fields for PERMANENT FIXED contracts from WEB scraped data. Return JSON array of validation results.
+
+**BASIC FIELDS VALIDATION** - Core contract identifiers and parties:
+
+"Contract Number" - Must be present and match format
+
+"Customer Name" - Must be present in web data
+
+"Brand Name" - Must be present (may appear twice in list, validate both instances) 
+
+"Building Name" - Must be present and contain building information
+
+"Unit ID" - Must be present. Accept formats: PXXXX (e.g., P001) or PGXXX (e.g., PG047)
+
+"Building ID" - Must be present as 4-digit number
+
+**WEB-SPECIFIC RULES:**
+- Web data may have different field names than PDF
+- Focus on data completeness from web scraping
+- Allow for web formatting differences
+- Validate that essential identification information is captured
+
+**LO/LR CONTRACT VARIATIONS:**
+- **LR CONTRACT RULE**: For LR (renewal) contracts, some fields may be abbreviated
+- **LO CONTRACT RULE**: For LO (new) contracts, all fields should be complete
+
+Return format:
+[
+  {
+    "field": "Field name", 
+    "value": "Web extracted value",
+    "valid": true or false,
+    "reason": "Validation explanation"
+  }
+]

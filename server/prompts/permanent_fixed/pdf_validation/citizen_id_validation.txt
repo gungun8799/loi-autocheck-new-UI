@@ -1,0 +1,110 @@
+Validate citizen ID requirements and return ONLY a JSON array. DO NOT include any explanatory text before or after the JSON.
+
+**STEP 1: Customer Type**
+Check "Customer Name": business terms (Co., Ltd., Inc.) = "Corporate"; person name = "Individual"; uncertain = "—"
+
+**STEP 2: Validation Rules**
+
+**CUSTOMER TYPE VALIDATION:**
+- "Customer Type" - Based on "Customer Name" analysis: Contains business terms (บริษัท, จำกัด, Co., Ltd., Inc., Corporation, Corp.) = "Corporate"/valid; Thai personal name patterns (นาย, นาง, นางสาว + personal name) = "Individual"/valid; Uncertain cases = "—"/invalid with reason "Cannot determine customer type from name"
+
+**FOR INDIVIDUALS:**
+- "Citizen ID Number" - **LO/LR ENHANCED EXTRACTION:** 
+  1. **LO Contracts**: Look in Thai National ID Card pages or personal information sections
+  2. **LR Contracts**: Look in existing customer verification sections
+  3. Multiple search patterns:
+     - "เลขประจำตัวประชาชน" or "Identification Number" followed by number sequence
+     - Pattern like "X XXXX XXXXX XX X" (13 digits with spaces)
+     - Numbers on Thai National ID Card pages near "บัตรประจำตัวประชาชน"
+  4. Extract complete sequence preserving original format with spaces (e.g., "3 1501 00126 15 8")
+  5. **VALIDATION RULE - IGNORE SPACES COMPLETELY**: 
+     - IMPORTANT: Remove ALL spaces first, then count digits only
+     - Example: "3 8099 00513 24 7" → remove spaces → "3809900513247" → 13 digits → VALID ✅
+     - Example: "3 1501 00126 15 8" → remove spaces → "3150100126158" → 13 digits → VALID ✅
+     - Example: "1 2345 67890 12" → remove spaces → "123456789012" → 12 digits → INVALID ❌
+     - CRITICAL: A citizen ID with spaces like "3 8099 00513 24 7" is VALID if it has exactly 13 digits after removing spaces
+  6. Return the number with original spacing format for display
+- "Citizen ID expiration date" - **VALIDATION RULE:** Must be **at least 6 months from today** (compute at runtime using the **Gregorian/AD** calendar). If a **Buddhist Era (BE)** year is detected (e.g., year ≥ 2400), **convert to AD by subtracting 543** before comparison (e.g., `2566-01-07` → `2023-01-07`, which is expired). If the converted expiration date is **earlier than today + 6 months** or already past, mark as **invalid**.
+- "Name on Citizen ID card" - **LO/LR PATTERNS:** 
+  1. **LO Contracts**: Extract from attached ID card images or personal info sections
+  2. **LR Contracts**: Extract from existing customer ID verification
+  3. Must match "Customer Name" (ignore titles like นาย, นาง, นางสาว)
+  4. Allow minor spelling variations due to OCR
+- "Address on Citizen ID card" - **LO/LR PATTERNS:**
+  1. **LO Contracts**: Extract from ID card copies or registration forms
+  2. **LR Contracts**: Extract from customer verification documents
+  3. Valid if complete address present, invalid if empty
+  4. Should include sub-district, district, province
+- Company fields - Mark as "—" (not applicable)
+
+**FOR CORPORATES:**
+- Individual fields - Mark as "—" (not applicable)
+- "Company Registration Number" - **LO/LR PATTERNS:**
+  1. **LO Contracts**: Look in company certificate documents or registration pages
+  2. **LR Contracts**: Look in existing corporate verification sections
+  3. Must be 10-15 digits
+  4. Search for "ทะเบียนนิติบุคคล" or "Company Registration"
+- "Company Certificate issued date" - **LO/LR PATTERNS:**
+  1. **LO Contracts**: Extract from company certificate documents
+  2. **LR Contracts**: Extract from corporate verification documents
+  3. Must be valid date format
+  4. Look for "ออกให้ ณ วันที่" or "Issued Date"
+- Company certificate validation (focus on bottom 2/3 of document)
+
+- "แนบหนังสือรับรองบริษัท" - Check if PDF includes corporate certificate document or "หนังสือรับรองความเป็นนิติบุคคล": present = "Yes"/valid, absent = "No"/invalid
+- "มีตราประทับบนหนังสือรับรองบริษัทหรือไม่" - **ENHANCED STAMP DETECTION:** ALWAYS perform stamp detection when PDF is provided. Look carefully in the BOTTOM 2/3 of the document for ANY of these stamp indicators on the company certificate: circular/round stamps, official seals, embossed marks, red ink stamps, government department stamps, "ตรา" marks, raised impressions, or any official marking that appears to be a company/authority stamp. Even faint, partially visible, or watermarked stamps count as valid. If ANY stamp-like marking is detected: "Yes"/valid, only if completely absent: "No"/invalid
+- "Authorized Signatory Match" - Check if the signee name matches the authorized signatory name indicated on the corporate certificate: match = "Yes"/valid, no match = "No"/invalid
+- "Citizen ID Number" - **FOR CORPORATE LO/LR PATTERNS**: 
+  1. **LO Contracts**: Look for authorized signatory ID in company documents or ID card attachments
+  2. **LR Contracts**: Look for existing authorized representative ID verification
+  3. Multiple search patterns:
+     - "เลขประจำตัวประชาชน" or "Identification Number" followed by number sequence
+     - Pattern like "X XXXX XXXXX XX X" (13 digits with spaces)
+     - Numbers on Thai National ID Card pages near "บัตรประจำตัวประชาชน"
+  4. Extract complete sequence preserving original format with spaces (e.g., "3 1501 00126 15 8")
+  5. **VALIDATION RULE - IGNORE SPACES COMPLETELY**: 
+     - IMPORTANT: Remove ALL spaces first, then count digits only
+     - Example: "3 8099 00513 24 7" → remove spaces → "3809900513247" → 13 digits → VALID ✅
+     - Example: "3 1501 00126 15 8" → remove spaces → "3150100126158" → 13 digits → VALID ✅
+     - Example: "1 2345 67890 12" → remove spaces → "123456789012" → 12 digits → INVALID ❌
+     - CRITICAL: A citizen ID with spaces like "3 8099 00513 24 7" is VALID if it has exactly 13 digits after removing spaces
+  6. Return the number with original spacing format for display
+- "Name on Citizen ID card" - **FOR CORPORATE LO/LR PATTERNS**: 
+  1. **LO Contracts**: Match ID card name with authorized signatories from company certificate
+  2. **LR Contracts**: Verify against existing authorized representative records
+  3. Search for "ผู้มีอำนาจลงนาม" in BOTTOM 2/3 of company certificate
+  4. Valid if name matches any authorized signatory, invalid if no match
+  5. Allow minor spelling variations due to OCR
+- "Company Registration Number" - **REGEX-LIKE PATTERN:** Find text matching the pattern "ทะเบียน.*เลข.*[10-15 digits]" then extract only the long numerical sequence (10-15 digits) from that match. Example: from "ทะเบียนนิติบุคคลเลขที่ 0245555001990" extract "0245555001990".
+- "Company Certificate issued date" - **REGEX-LIKE PATTERN:** Find text matching the pattern "ออกให้.*พ.ศ..*[4-digit year]" then extract the complete date. Example: from "ออกให้ ณ วันที่ 17 เดือน เมษายน พ.ศ. 2568" extract the full date, convert Buddhist year to Gregorian (2568-543=2025). **VALIDATION:** Certificate must be issued MORE than 6 months ago from today (use system timestamp). Valid if older than 6 months.
+- "Names on Company Certificate" - **REGEX-LIKE PATTERN:** Find all lines matching the pattern "นาย.*[Thai surname]" that appear after "กรรมการ" context. Example: extract lines like "1. นายวิชัย เสริมศักดิ์ศศิธร", "2. นายธานินทร์ เสริมศักดิ์ศศิธร", etc. Extract ALL such names and format as: "1. [Name1], 2. [Name2], 3. [Name3], 4. [Name4], 5. [Name5]"
+- "Company Registered Address" - **RELAXED VALIDATION PATTERN:** 
+  1. **EXTRACTION**: Find text starting with "ตั้งอยู่เลขที่" or "สำนักงานแห่งใหญ่" then extract the complete address that follows
+  2. **VALIDATION CRITERIA - VERY FLEXIBLE**: 
+     - Valid if contains at least street number (เลขที่) AND one location component (ตำบล, อำเภอ, or จังหวัด)
+     - **ACCEPT PARTIAL ADDRESSES**: Even if incomplete, mark as valid if basic structure exists
+     - **ALLOW OCR ERRORS**: Minor misspellings or truncations are acceptable
+     - **CONTEXT UNDERSTANDING**: "เลขที่ 99/1 หมู่ที่ 2 ตำบล..." should be considered valid even if truncated
+  3. **DO NOT** compare with customer address or require perfect formatting
+
+**DYNAMIC FIELD NAMING:**
+- For Individual customers: Use original field names ("Citizen ID Number", "Citizen ID expiration date", "Name on Citizen ID card", "Address on Citizen ID card")  
+- For Corporate customers: Use mixed naming - keep citizen fields for ID validation, use company fields for certificate data:
+  * "Citizen ID Number" (from attached ID card)
+  * "Name on Citizen ID card" (validate against authorized signatories)
+  * "Company Registration Number" (from company certificate)
+  * "Company Certificate issued date" (from company certificate)
+  * "Names on Company Certificate" (from company certificate)
+  * "Company Registered Address" (from company certificate)
+
+Return format - IMPORTANT: Return ONLY valid JSON array, no explanatory text:
+[
+  {
+    "field": "Field name (use appropriate naming based on customer type)",
+    "value": "Extracted value (or null)", 
+    "valid": true or false,
+    "reason": "Explanation"
+  }
+]
+
+CRITICAL: Your response must start with '[' and end with ']'. Do not include any text outside the JSON array.

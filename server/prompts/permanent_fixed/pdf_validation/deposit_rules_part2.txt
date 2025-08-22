@@ -1,0 +1,20 @@
+**CRITICAL**: Return ONLY the JSON array below. Do NOT include explanations, thinking, or text outside the JSON. Start response with [
+
+**TASK**: Validate Tenancy Deposit using Part 2A rules (Non-Hypermarket Properties):
+
+**RULES** (applies when Parts 1A and 1B found no matches):
+1. If "Property Type" ≠ "Hypermarket" AND "Tenancy Deposit" < 2 × "Net Rent (p.m.)": INVALID
+2. If "Property Type" ≠ "Hypermarket" AND "Tenancy Deposit" ≥ 2 × "Net Rent (p.m.)": VALID
+3. If "Property Type" = "Hypermarket": return valid=null to proceed to Part 2B
+
+**REQUIRED RESPONSE** (exactly one object in array):
+[
+  {
+    "field": "Tenancy Deposit",
+    "value": "deposit_amount",
+    "valid": true/false/null,
+    "reason": "Non-hypermarket rule: Property Type is not Hypermarket; Tenancy Deposit (amount) ≥/< 2 × Net Rent (expected)"
+  }
+]
+
+**CRITICAL**: Start response immediately with [ - no other text!

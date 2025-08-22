@@ -1,0 +1,20 @@
+Validate Tenancy Deposit from WEB - PART 3 (Default Rule). Return JSON array.
+
+Extract from Simplicity data: Monthly Amount of rent, Monthly Service Charge, Total Deposits
+Note: Total Monthly Amount = Monthly Amount of rent + Monthly Service Charge
+
+**DEFAULT RULE (if Parts 1 & 2 didn't apply):**
+
+Total Deposits MUST be at least 3.00 × (Monthly Amount of rent + Monthly Service Charge)
+
+If Total Deposits < 3.00 × (Monthly Amount of rent + Monthly Service Charge):
+  Return: {"field":"Tenancy Deposit","value":"[amount]","valid":false,"reason":"Default Rule = 3 months of total charges required (Rent+Service)"}
+
+If Total Deposits ≥ 3.00 × (Monthly Amount of rent + Monthly Service Charge):
+  Return: {"field":"Tenancy Deposit","value":"[amount]","valid":true,"reason":"Default Rule = 3 months of total charges met (Rent+Service)"}
+
+Example calculations:
+- Rent: 42,436.00, Service: 0, Total Required: 127,308.00
+- Rent: 30,000.00, Service: 10,000.00, Total Required: 120,000.00
+
+Note: Handle web formatting (commas, currency symbols)

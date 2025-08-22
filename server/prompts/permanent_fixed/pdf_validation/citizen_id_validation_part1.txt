@@ -1,0 +1,26 @@
+Validate citizen ID requirements (Part 1/2 - Individual Customers). Return ONLY JSON array.
+
+**STEP 1: Customer Type**
+Check "Customer Name": business terms (Co., Ltd., Inc.) = "Corporate"; person name = "Individual"; uncertain = "—"
+
+**STEP 2: Validation Rules**
+
+**FOR INDIVIDUALS:**
+- "Citizen ID Number" - Must be exactly 13 digits
+- "Citizen ID expiration date" - Must be at least 6 months in future from current date. **CRITICAL:** Current year is 2025 (Gregorian calendar), NOT 2566 or any Buddhist year. If expiration is "2566-01-07", this is actually year 2023 (2566-543=2023) which is expired
+- "Name on Citizen ID card" - Must match "Customer Name" (ignore titles like นาย นางสาว)
+- "Address on Citizen ID card" - Valid if present, invalid if empty
+
+**FOR CORPORATES:** Return empty array [] (handled in Part 2)
+
+Return ONLY this JSON format:
+[
+  {
+    "field": "exact field name",
+    "value": "actual value or null",
+    "valid": true/false,
+    "reason": "brief explanation"
+  }
+]
+
+IMPORTANT: Response must be valid JSON starting with [ and ending with ]

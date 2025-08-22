@@ -1,0 +1,24 @@
+Extract utility information from PDF data and return in JSON format.
+
+**NOTE:** Service Express contracts may have different utility presentation than Permanent Fixed contracts.
+
+Required fields:
+"Include Utility" - **CALCULATION LOGIC:** Output "Yes" or "No". Return "Yes" if any of "Utilities charge (water)", "Utilities charge (Electricity)", "Utilities charge (cooking gas)" has non-zero value. Return "No" if all are 0.00 or missing.
+
+"Utilities charge (water)" - **PDF PATTERNS:** Look for "ค่าน้ำ" followed by number and "บาทต่อหน่วย". Extract the numeric value. If nothing found, put 0.00
+
+"Utilities charge (Electricity)" - **PDF PATTERNS:** Look for "ค่าไฟฟ้า" followed by number and "บาทต่อหน่วย". Extract the numeric value. If nothing found, put 0.00
+
+"Utilities charge (cooking gas)" - **PDF PATTERNS:** Look for "ค่าก๊าซหุงต้ม" followed by number and "บาทต่อหน่วย". Extract the numeric value. If nothing found, put 0.00
+
+**PDF-SPECIFIC THAI PATTERNS:**
+- "ค่าน้ำ" = water charge
+- "ค่าไฟฟ้า" = electricity charge  
+- "ค่าก๊าซหุงต้ม" = cooking gas charge
+- "บาทต่อหน่วย" = baht per unit
+- Look for numeric values after utility type descriptions
+
+**CALCULATION RULES:**
+- Extract all three utility charge values first
+- If any of the three utility charges is non-zero, return "Include Utility" as "Yes"
+- If all three are exactly 0.00 (or missing), return "Include Utility" as "No"

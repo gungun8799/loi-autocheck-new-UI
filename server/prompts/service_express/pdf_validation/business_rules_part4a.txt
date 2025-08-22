@@ -1,0 +1,15 @@
+Validate business rules (Part 4a/6) and return JSON array of validation results.
+
+Validation Rules (Part 4a - Monthly Rental Rate):
+
+"Monthly Rental Rate" - Valid if numeric and > 0. If null/non-numeric/≤ 0: invalid "Monthly Rental Rate ('<value>') is not a positive number". Else valid "Monthly Rental Rate is valid"
+
+Return format:
+[
+  {
+    "field": "Field name", 
+    "value": "Extracted value (or null)",
+    "valid": true or false,
+    "reason": "Explanation"
+  }
+]

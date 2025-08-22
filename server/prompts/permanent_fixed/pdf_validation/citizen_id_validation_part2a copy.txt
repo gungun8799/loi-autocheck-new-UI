@@ -1,0 +1,32 @@
+Validate citizen ID requirements (Part 2a/3 - Corporate Basic Fields). Return ONLY JSON array.
+
+**STEP 1: Customer Type**
+Check "Customer Name": business terms (Co., Ltd., Inc.) = "Corporate"; person name = "Individual"; uncertain = "—"
+
+**STEP 2: Basic Corporate Validation (Part 2a)**
+
+**FOR CORPORATES - Basic Fields:**
+- "Citizen ID Number" - **FOR CORPORATE**: Extract 13-digit number from attached citizen ID card. Valid if exactly 13 digits. Reason: "Corporate customer - citizen ID from attached ID card: [13-digit number]"
+1. Remove all spaces before validation.
+2. Must contain only digits (0–9).
+3. Must be exactly 13 digits after removing spaces.
+4. Valid if length = 13 and all are digits, otherwise invalid.- "Name on Citizen ID card" - **FOR CORPORATE**: Check if name matches authorized signatory on company certificate. Valid if match found. Reason: "Name matches authorized signatory" or "Name does not match"
+- "Name on Citizen ID card" - **FOR CORPORATE**: Check if name matches authorized signatory on company certificate. Valid if match found. Reason: "Name matches authorized signatory" or "Name does not match"
+- "Company Registration Number" - **REGEX-LIKE PATTERN:** Find "ทะเบียน.*เลข.*[10-15 digits]" then extract numerical sequence. Example: from "ทะเบียนนิติบุคคลเลขที่ 0245555001990" extract "0245555001990"
+- "Company Certificate issued date" - **REGEX-LIKE PATTERN:** Find "ออกให้.*พ.ศ..*[4-digit year]" then extract complete date. Convert Buddhist year to Gregorian (2568-543=2025). **VALIDATION:** Certificate must be issued MORE than 6 months ago from today (use system timestamp). Example: If today is Dec 2025, certificate from Apr 2025 (17 เมษายน 2568) is valid (8+ months old)
+
+**FOR INDIVIDUALS:** Return empty array [] (handled in Part 1)
+
+**DYNAMIC FIELD NAMING:** Use mixed naming - citizen fields for ID validation, company fields for certificate data
+
+Return format:
+[
+  {
+    "field": "Field name (use appropriate naming based on customer type)",
+    "value": "Extracted value (or null)", 
+    "valid": true or false,
+    "reason": "Explanation"
+  }
+]
+
+IMPORTANT: Response must be valid JSON starting with [ and ending with ]

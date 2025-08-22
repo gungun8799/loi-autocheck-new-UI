@@ -1,0 +1,22 @@
+**CRITICAL**: Return ONLY the JSON array below. Do NOT include explanations, thinking, or text outside the JSON. Start response with [
+
+**TASK**: Validate Tenancy Deposit using Part 1B rules (ATM Brand Exceptions):
+
+**RULES**:
+1. If "Brand Name" contains "ATM SCB": ALWAYS VALID (regardless of deposit amount)
+2. If "Brand Name" contains "ATM KBANK" AND "Property Type" is "Go Fresh": 
+   - If "Tenancy Deposit" ≥ 1 × "Net Rent (p.m.)": VALID
+   - If "Tenancy Deposit" < 1 × "Net Rent (p.m.)": INVALID
+3. If no ATM brand rules match: return valid=null to proceed to Part 2A
+
+**REQUIRED RESPONSE** (exactly one object in array):
+[
+  {
+    "field": "Tenancy Deposit",
+    "value": "deposit_amount",
+    "valid": true/false/null,
+    "reason": "ATM brand exception: [specific rule applied]"
+  }
+]
+
+**CRITICAL**: Start response immediately with [ - no other text!

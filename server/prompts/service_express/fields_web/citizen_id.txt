@@ -1,0 +1,36 @@
+Extract citizen ID and company certificate information from WEB scraped data and return in JSON format.
+
+**IMPORTANT:** For corporate customers (Customer Name contains "บริษัท", "จำกัด", "Co.", "Ltd."), also extract company certificate information.
+
+Required fields:
+"Name on Citizen ID card" - **WEB:** Name as it appears on citizen ID from web form fields or uploaded documents
+
+"Address on Citizen ID card" - **WEB:** Address as it appears on citizen ID from web form fields
+
+"Citizen ID Number" - **WEB:** 13-digit Thai citizen ID number from web form inputs or uploaded document data
+
+"Citizen ID expiration date" - **WEB:** Expiration date of citizen ID from web form or document data
+
+**FOR CORPORATE CUSTOMERS ONLY:**
+"Company Registration Number" - **WEB:** Company registration number from web form corporate information section
+
+"Company Certificate issued date" - **WEB:** Company certificate issued date from uploaded corporate documents or form data
+
+"Names on Company Certificate" - **WEB:** Director names from company certificate information in web forms or uploaded documents
+
+"Company Registered Address" - **WEB:** Complete company registered address from corporate information section:
+- Extract from web form corporate address fields
+- May include: street number, village/moo, sub-district, district, province, postal code
+- Ensure complete address is captured from all relevant form fields
+
+"แนบหนังสือรับรองบริษัท" - **WEB:** Check if company registration certificate document has been uploaded or attached in web interface. Return "Yes" if uploaded, "No" if missing
+
+"มีตราประทับบนหนังสือรับรองบริษัทหรือไม่" - **WEB:** For web data, typically not determinable from interface. Return "Not available from web data" or check document metadata if available
+
+"Workflow status" - **WEB:** Extract workflow status from web interface status fields: Start, Draft, Pending GTO Update, Pending Approval, Accepted, Rejected
+
+**NOTE:** 
+- For individual customers, company certificate fields should return null
+- Web data may not have all PDF-visible details like stamps
+- Focus on form fields and uploaded document metadata
+- Some corporate certificate details may not be available in web interface

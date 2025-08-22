@@ -1,0 +1,29 @@
+Validate citizen ID requirements (Part 2a/3 - Corporate Basic Fields). Return ONLY JSON array.
+
+**STEP 1: Customer Type**
+Check "Customer Name": business terms (Co., Ltd., Inc.) = "Corporate"; person name = "Individual"; uncertain = "—"
+
+**STEP 2: Basic Corporate Validation (Part 2a)**
+
+**FOR CORPORATES - Basic Fields:**
+- "Citizen ID Number" – Validation Rules: Always mark valid
+- "Citizen ID expiration date" - **VALIDATION RULE:** For corporate authorized signers, ID must be **at least 6 months from today**. If a **Buddhist Era (BE)** year is detected (e.g., year ≥ 2400), **convert to AD by subtracting 543** before comparison. If the converted expiration date is **earlier than today + 6 months** or already past, mark as **invalid**. If no expiration date found, mark as invalid with reason "Missing ID expiration date for authorized signer"
+- "Name on Citizen ID card" - **VALIDATION RULE:** For corporate customers, this is the authorized signer's name from their citizen ID. Should be a Thai name with proper format (e.g., "นาย ทศพล ไวยสิทธิ์"). If present and contains Thai characters, mark as valid. If missing or empty, mark as invalid with reason "Missing authorized signer name from citizen ID"
+- "Company Registration Number" - **REGEX-LIKE PATTERN:** Find "ทะเบียน.*เลข.*[10-15 digits]" then extract numerical sequence. Example: from "ทะเบียนนิติบุคคลเลขที่ 0245555001990" extract "0245555001990"
+- "Company Certificate issued date" - **REGEX-LIKE PATTERN:** Find "ออกให้.*พ.ศ..*[4-digit year]" then extract complete date. Convert Buddhist year to Gregorian (2568-543=2025). **VALIDATION:** Certificate must be issued MORE than 6 months ago from today (use system timestamp). Example: If today is Dec 2025, certificate from Apr 2025 (17 เมษายน 2568) is valid (8+ months old)
+
+**FOR INDIVIDUALS:** Return empty array [] (handled in Part 1)
+
+**DYNAMIC FIELD NAMING:** Use mixed naming - citizen fields for ID validation, company fields for certificate data
+
+Return ONLY this JSON format:
+[
+  {
+    "field": "exact field name",
+    "value": "actual value or null",
+    "valid": true/false,
+    "reason": "brief explanation"
+  }
+]
+
+IMPORTANT: Response must be valid JSON starting with [ and ending with ]

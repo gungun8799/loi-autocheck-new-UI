@@ -1,0 +1,27 @@
+Extract lease term information from PDF data and return in JSON format.
+
+**IMPORTANT:** For Service Express contracts, focus on rental amounts and basic lease information.
+
+Required fields:
+"Rental Rate Before Tax (Monthly)" - **PDF PATTERNS:** Look for "ค่าเช่าต่อเดือน" or "ค่าเช่า" followed by amount in Thai Baht. Extract numeric value without "บาท" or currency symbols.
+
+"Lease term (year)" - **PDF PATTERNS:** Look for lease duration in Thai text. Common patterns: "X ปี" (X years), "จำนวน X ปี" (number of X years), or duration text near contract period descriptions.
+
+"Lease term (month)" - **PDF PATTERNS:** Look for additional months beyond full years. Patterns: "X เดือน" (X months), or calculate remaining months from total lease period.
+
+"Minimum Advance Notice" - **PDF PATTERNS:** Look for advance notice requirements in Thai contract text. Common patterns include notice periods for termination or renewal.
+
+"Contract Start Date" - **PDF PATTERNS:** Look for "วันที่เริ่มสัญญา" or "เริ่มวันที่" followed by Thai date format. Convert to standard YYYY-MM-DD format.
+
+"Contract End Date" - **PDF PATTERNS:** Look for "วันที่สิ้นสุดสัญญา" or "สิ้นสุดวันที่" followed by Thai date format. Convert to standard YYYY-MM-DD format.
+
+**PDF-SPECIFIC THAI PATTERNS:**
+- "ค่าเช่า" = rent/rental fee
+- "ต่อเดือน" = per month  
+- "ปี" = year
+- "เดือน" = month
+- "วันที่" = date
+- "เริ่ม" = start
+- "สิ้นสุด" = end
+- Thai numerals may appear in dates and amounts
+- Look for contract period sections in legal document structure

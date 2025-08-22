@@ -1,0 +1,26 @@
+Validate deposit rules (Part 2/2) and return JSON array of validation results.
+
+Extract: Net Rent, Service Charge, Property Type, Tenancy Deposit
+Note: Total Monthly Amount = Net Rent + Service Charge
+
+"Tenancy Deposit" Rules (Part 2 - Final validation rules):
+
+4. **Non-Hypermarket Exception**: If "Property Type" is NOT "Hypermarket"
+   - If deposit < 2 × (Net Rent + Service Charge): ❌ Invalid "Property Type is not Hypermarket; Tenancy Deposit (<deposit>) is less than 2 × total monthly charges (=<expected>)"
+   - Else: ✅ Valid "Property Type is not Hypermarket; Tenancy Deposit (<deposit>) ≥ 2 × total monthly charges (=<expected>)"
+
+5. **Default Rule** (applies when no other rules match): 
+   - If deposit < 3 × (Net Rent + Service Charge): ❌ Invalid "Tenancy Deposit (<deposit>) is less than 3 × total monthly charges (=<expected>)"
+   - Else: ✅ Valid "Tenancy Deposit (<deposit>) ≥ 3 × total monthly charges (=<expected>)"
+
+**NOTE**: This validates cases not handled by Part 1. Apply rules 4 and 5 in order.
+
+Return format:
+[
+  {
+    "field": "Tenancy Deposit",
+    "value": "Extracted value",
+    "valid": true or false,
+    "reason": "Explanation with amounts and rules applied"
+  }
+]

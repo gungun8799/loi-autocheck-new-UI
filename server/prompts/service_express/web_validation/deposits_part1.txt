@@ -1,0 +1,23 @@
+Validate Tenancy Deposit from WEB - PART 1 (ATM & Low Rent Rules). Return JSON array.
+
+Extract from Simplicity data: Contract Number, Property Type, Brand Name, Monthly Amount of rent, Monthly Service Charge, Total Deposits
+Note: Total Monthly Amount = Monthly Amount of rent + Monthly Service Charge
+
+**CHECK THESE RULES FIRST:**
+
+1. **Service Express Low Rent Exception**: For Service Express contracts, if Monthly Amount of rent ≤ 5000
+   - If Total Deposits < 1 × (Monthly Amount of rent + Monthly Service Charge): ❌ Invalid "Service Express: Low rent (≤5000) - Total Deposits (<deposit>) is less than required 1 × total monthly charges (=<total>)"
+   - Else: ✅ Valid "Service Express: Low rent (≤5000) - Total Deposits (<deposit>) is acceptable (≥ 1 × total monthly charges)"
+
+2. **ATM SCB Exception**: If Brand Name contains "ATM SCB" (case-insensitive)
+   - If Total Deposits == 0: ✅ Valid "Brand Name contains ATM SCB; Total Deposits may be zero"
+   - Else: ✅ Valid "Brand Name contains ATM SCB; Total Deposits (<deposit>) is acceptable (≥ 0)"
+
+3. **ATM KBANK & Go Fresh Exception**: If Brand Name contains "ATM KBANK" AND Property Type is "Go Fresh"
+   - If Total Deposits < 1 × (Monthly Amount of rent + Monthly Service Charge): ❌ Invalid "Brand Name contains ATM KBANK and Property Type is Go Fresh; Total Deposits (<deposit>) is less than 1 × total monthly charges (=<total>)"
+   - Else: ✅ Valid "Brand Name contains ATM KBANK and Property Type is Go Fresh; Total Deposits (<deposit>) ≥ 1 × total monthly charges (=<total>)"
+
+**If none of the above rules match, return:**
+[{"field":"Tenancy Deposit","value":"[amount]","valid":null,"reason":"No Part 1 rules matched - proceed to Part 2"}]
+
+Note: Handle web formatting (commas, currency symbols)

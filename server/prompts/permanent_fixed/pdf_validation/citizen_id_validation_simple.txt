@@ -1,0 +1,33 @@
+Validate citizen ID and company registration fields. Return ONLY JSON array.
+
+Check "Customer Name" to determine type:
+- Contains "บริษัท" or "จำกัด" or "Co." or "Ltd." → Corporate customer
+- Otherwise → Individual customer
+
+**FOR INDIVIDUAL CUSTOMERS, validate these fields:**
+1. "Citizen ID Number" - Must be exactly 13 digits
+2. "Citizen ID expiration date" - Must be valid date
+3. "Name on Citizen ID card" - Must match Customer Name
+4. "Address on Citizen ID card" - Must be present
+
+**FOR CORPORATE CUSTOMERS, validate these fields:**
+1. "Citizen ID Number" - **EXTRACTION:** Look for "เลขประจำตัวประชาชน" followed by 13-digit ID number (format: X XXXX XXXXX XX X). Extract all 13 digits as continuous number
+2. "Name on Citizen ID card" - **EXTRACTION:** Look for "ชื่อตัวและชื่อสกุล" followed by Thai name. Extract the full Thai name
+3. "Company Registration Number" - **EXTRACTION:** Look for "ทะเบียนนิติบุคคลเลขที่" followed by 10-13 digit number. Extract the registration number
+4. "Company Certificate issued date" - **EXTRACTION:** Look for "ออกให้ ณ วันที่" followed by date in Thai format. Extract the full date text
+5. "Names on Company Certificate" - **EXTRACTION:** Look for director list under "กรรมการของบริษัทมี" followed by numbered list. Extract all Thai names listed
+6. "Company Registered Address" - **EXTRACTION:** Look for "สำนักงานแห่งใหญ่" followed by address. Extract the complete address text
+7. "แนบหนังสือรับรองบริษัท" - **EXTRACTION:** Check if company registration certificate document exists in the PDF. Return "Yes" if certificate pages found, "No" if missing
+8. "มีตราประทับบนหนังสือรับรองบริษัทหรือไม่" - **EXTRACTION:** Look for company stamp/seal on certificate document. Return "Yes" if stamp visible, "No" if no stamp found
+
+Return ONLY this JSON format:
+[
+  {
+    "field": "exact field name",
+    "value": "actual value or null",
+    "valid": true/false,
+    "reason": "brief explanation"
+  }
+]
+
+IMPORTANT: Response must be valid JSON starting with [ and ending with ]

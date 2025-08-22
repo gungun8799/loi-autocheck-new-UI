@@ -1,0 +1,24 @@
+Validate basic financial fields for PERMANENT FIXED contracts from WEB scraped data. Return JSON array of validation results.
+
+**BASIC FINANCIAL FIELDS** - Space and rental rates:
+
+"Space (NLA)" - Must be present as numerical value
+
+"Monthly Rental Rate" - Must be present as numerical value (may appear twice in list, validate both instances)
+
+"Monthly Service Rate" - Must be present as numerical value
+
+**WEB-SPECIFIC RULES:**
+- Web data may have different field names than PDF
+- Focus on numerical value presence and formatting
+- Allow for web formatting differences (currency symbols, commas, etc.)
+
+Return format:
+[
+  {
+    "field": "Field name",
+    "value": "Web extracted value", 
+    "valid": true or false,
+    "reason": "Validation explanation"
+  }
+]

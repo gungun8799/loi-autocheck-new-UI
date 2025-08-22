@@ -1,0 +1,22 @@
+Validate business rules (Part 4/6) for PERMANENT FIXED contracts from WEB scraped data. Return JSON array of validation results.
+
+**BUSINESS RULES VALIDATION (Part 4 - Space Design & Building):**
+
+"Tenant type" - **CONTEXT-BASED MATCHING:** Validate that Tenant type (from PDF) contextually matches "Space Design Type" (from web data). The matching should be by context/meaning, not exact string match. Focus on the meaningful tenant category, ignoring format differences like codes, prefixes, or suffixes.
+
+"Building ID" - Validate 4-digit format from web source
+
+**WEB-SPECIFIC RULES:**
+- Web data may have different field names than PDF
+- Focus on contextual matching and format validation
+- Allow for web formatting differences
+
+Return format:
+[
+  {
+    "field": "Field name",
+    "value": "Web extracted value",
+    "valid": true or false,
+    "reason": "Validation explanation"
+  }
+]

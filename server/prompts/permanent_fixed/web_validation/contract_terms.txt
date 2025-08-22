@@ -1,0 +1,46 @@
+Validate contract terms for PERMANENT FIXED contracts from WEB scraped data. Return JSON array of validation results.
+
+**CONTRACT TERMS VALIDATION** - Lease details and classifications:
+
+"Lease Type" - Must match contract type (Permanent Fixed)
+
+"อยู่กองทรัสต์หรือไม่" - Must be present ("Yes" or "No") 
+
+"Customer Type" - Must be present (Corporate, Individual, etc.)
+
+"Tenant type" - Must contextually match "Space Design Type" field from web extraction. Validate that the PDF tenant type is consistent with the web space design classification by meaning/context, not exact string match
+
+"Unit Status" - Must be present (Active, Accepted, etc.)
+
+"Proposed lease commencement date" - Must be present as valid date
+
+"Proposed lease expiry date" - Must be present as valid date
+
+"Billing Options" - Must be "Calendar Month" for Permanent Fixed contracts
+
+"Payment Term" - Must be "due in 7 days" for Permanent Fixed contracts. **LR CONTRACT EXCEPTION**: If contract number contains "LR", mark as valid even if NULL
+
+"Rental Ratio" - **CONDITIONAL VALIDATION**: 
+  - If "Monthly Amount of service" is NOT zero, then Rental Ratio can be "40" or "0" (both valid)
+  - If "Monthly Amount of service" IS zero OR missing, then Rental Ratio must be "100"
+  - Accept numeric formats: "40", "0", "100" or with % symbol: "40%", "0%", "100%"
+
+**WEB-SPECIFIC RULES:**
+- Web data may have different field names than PDF
+- Focus on lease term completeness from web scraping
+- Allow for date format differences
+- Validate that lease period and classifications are captured
+
+**LO/LR CONTRACT VARIATIONS:**
+- **LR CONTRACT RULE**: For LR (renewal) contracts, dates may show renewal periods
+- **LO CONTRACT RULE**: For LO (new) contracts, dates should show initial lease period
+
+Return format:
+[
+  {
+    "field": "Field name",
+    "value": "Web extracted value",
+    "valid": true or false, 
+    "reason": "Validation explanation"
+  }
+]

@@ -1,0 +1,41 @@
+Extract service charge information and return in JSON format.
+
+**IMPORTANT:** For PDF data, look for Thai text patterns. Common area service charges appear as "ค่าบริการพิเศษสำหรับไอเย็น" or "ค่าบริการพิเศษสําหรับไอเย็นและไฟฟ้า(พื้นที่ส่วนกลาง)" with amounts like "เดือนละ 5,880.00 บาท" and date ranges like "ตั้งแต่วันที่ 01 กรกฎาคม 2568 จนถึงวันที่ 30 มิถุนายน 2570".
+
+**CRITICAL MAPPING RULES:**
+- "Common Area Cool Air Service Fee" → Map to "Common area" fields, NOT "in the renting space" fields
+- Only map charges to "in the renting space" if they are specifically for the tenant's individual space, NOT common area services
+- If only "Common Area Cool Air Service Fee" exists, all "in the renting space" fields should be NULL
+
+Required fields:
+"Other service charge before tax (in the renting space)" - 
+**WEB PATTERNS:** Look in "Other Monthly Charges" section for "Cool Air Service Fee" (WITHOUT "Common Area" prefix). This is the renting space charge. Extract the "Monthly Amount" value. If not found, return 0.00.
+**PDF PATTERNS:** Look for "ค่าบริการพิเศษ" entries that contain keywords indicating renting space: "ภายในสถานที่เช่า", "ในสถานที่เช่า", "สถานที่เช่า" or similar. Extract the amount after "เดือนละ" and before "บาท". If no renting space specific charge found, return 0.00.
+
+"Other service charge (in the renting space) Charge description" - 
+**WEB PATTERNS:** For "Cool Air Service Fee" (without "Common Area"), extract the charge description. This distinguishes it from common area charges.
+**PDF PATTERNS:** For charges identified as renting space charges (containing "ภายในสถานที่เช่า" or similar), extract the descriptive text between "ค่าบริการพิเศษ" and "เดือนละ". Clean up line breaks and extra spaces. Include Thai text in parentheses like "สําหรับไอเย็น". If no renting space charge exists, return null.
+
+"Other service charge (in the renting space) start date" - 
+**WEB PATTERNS:** For "Cool Air Service Fee" row, extract the "Applicable Start Date" value. Format as YYYY-MM-DD.
+**PDF PATTERNS:** For renting space charges, look for "ตั้งแต่วันที่" near the charge description. If not found but renting space charge exists, use the main contract start date from "ระยะเวลาการเช่า" section. If no renting space charge, return null.
+
+"Other service charge (in the renting space) end date" - 
+**WEB PATTERNS:** For "Cool Air Service Fee" row, extract the "Applicable End Date" value. Format as YYYY-MM-DD.
+**PDF PATTERNS:** For renting space charges, look for "จนถึงวันที่" or "ถึงวันที่" near the charge description. If not found but renting space charge exists, use the main contract end date from "ระยะเวลาการเช่า" section. If no renting space charge, return null.
+
+"Other service charge before tax (Common area)" - **WEB PATTERNS:** Look in "Other Monthly Charges" section for "Common Area Cool Air Service Fee", "Service Charge", "Additional Service Fee". Extract the "Monthly Amount" value. **CRITICAL:** Always provide a value - if no common area service charge found, put 0.00. **PDF PATTERNS:** Look for "ค่าบริการพิเศษ" entries that contain common area keywords: "พื้นที่ส่วนกลาง", "ส่วนกลาง", "พื้นที่รวม" or do NOT contain renting space keywords. Extract the amount after "เดือนละ" and before "บาท". Remove commas from the captured amount.
+
+"Other service charge (Common area) Charge description" - **WEB PATTERNS:** Look in "Other Monthly Charges" section for the "Charge Description", "Service Description", "Fee Description" column. Extract the description text. **CRITICAL:** If service charge amount > 0, provide description; if amount = 0, put null. **PDF PATTERNS:** For charges identified as common area charges (containing "พื้นที่ส่วนกลาง" or not containing renting space keywords), extract the descriptive text between "ค่าบริการพิเศษ" and "เดือนละ". Clean up line breaks and extra spaces, preserve Thai text. Remove "(พื้นที่ส่วนกลาง)" from the end if present.
+
+"Other service charge (Common area) start date" - **WEB PATTERNS:** Look for "APPLICABLE START DATE", "Service Start Date", or use "Proposed lease commencement date" if service charge exists. **CRITICAL:** If service charge amount > 0, use contract start date. **PDF PATTERNS:** For common area charges, look for "ตั้งแต่วันที่" near the charge description. If not found but common area charge exists, use the main contract start date from "ระยะเวลาการเช่า" section.
+
+"Other service charge (Common area) end date" - **WEB PATTERNS:** Look for "APPLICABLE END DATE", "Service End Date", or use "Proposed lease expiry date" if service charge exists. **CRITICAL:** If service charge amount > 0, use contract end date. **PDF PATTERNS:** For common area charges, look for "จนถึงวันที่" or "ถึงวันที่" near the charge description. If not found but common area charge exists, use the main contract end date from "ระยะเวลาการเช่า" section.
+
+"Other service charge before tax (public space)" - If cannot find anything, put 0.00
+
+"Other service charge (public space) Charge description" - Description for public space charges
+
+"Other service charge (public space) start date" - Start date for public space charges
+
+"Other service charge (public space) end date" - End date for public space charges

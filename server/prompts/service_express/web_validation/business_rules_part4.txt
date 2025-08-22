@@ -1,0 +1,22 @@
+Validate business rules (Part 4/6) for SERVICE EXPRESS contracts from WEB scraped data. Return JSON array of validation results.
+
+**BUSINESS RULES VALIDATION (Part 4 - Space Design & Building):**
+
+"Space Design Type" - **LR SKIP RULE:** If contract contains "LR": always valid "LR contract - Space Design Type validation skipped". Otherwise: Contextual match with "Tenant Type" value. The Space Design Type should match the tenant category from web data by context, allowing for different formats.
+
+"Building ID" - Validate 4-digit format from web source (if available)
+
+**WEB-SPECIFIC RULES:**
+- Only validate fields that are actually present in the web data
+- Focus on contextual matching and format validation
+- Allow for web formatting differences
+
+Return format:
+[
+  {
+    "field": "Field name",
+    "value": "Web extracted value",
+    "valid": true or false,
+    "reason": "Validation explanation"
+  }
+]

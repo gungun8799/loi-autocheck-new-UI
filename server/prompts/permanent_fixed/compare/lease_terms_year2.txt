@@ -1,0 +1,46 @@
+Compare Year 2 and Year 3 lease terms between PDF and Web sources. Return JSON array of comparison results.
+
+**INTELLIGENT DATE COMPARISON:**
+When comparing dates, MUST handle different calendar systems and formats:
+
+- Thai Buddhist dates (e.g., "30 มิถุนายน 2570") = Gregorian dates - 543 years
+- Convert Buddhist years to Gregorian: 2570 - 543 = 2027
+- Compare actual calendar dates, not text format
+
+**CRITICAL**: If dates represent the same calendar date after conversion, set "match": true regardless of format differences
+
+Compare these Year 2 and Year 3 fields:
+
+"Year 2 : Contract Start date" - **SMART DATE COMPARISON:** Convert Thai Buddhist to Gregorian, set "match": true if same calendar date, "match": false if different dates
+
+"Year 2 : Contract End date" - **SMART DATE COMPARISON:** Convert Thai Buddhist to Gregorian, set "match": true if same calendar date, "match": false if different dates
+
+"Year 2 : Charge Type" - Compare meaning: both fixed rate OR both variable rate = match  
+
+"Year 2 : Monthly Amount of rent" - **SMART AMOUNT COMPARISON:** Match if same amount OR if one appears to be per-sqm rate that equals the other when calculated
+
+"Year 2 : Monthly Amount of service" - **SMART AMOUNT COMPARISON:** Match if same amount OR if one appears to be per-sqm rate that equals the other when calculated
+
+"Year 3 : Contract Start date" - **SMART DATE COMPARISON:** Convert Thai Buddhist to Gregorian, set "match": true if same calendar date, "match": false if different dates
+
+"Year 3 : Contract End date" - **SMART DATE COMPARISON:** Convert Thai Buddhist to Gregorian, set "match": true if same calendar date, "match": false if different dates
+
+"Year 3 : Charge Type" - Compare meaning: both fixed rate OR both variable rate = match
+
+"Year 3 : Monthly Amount of rent" - **SMART AMOUNT COMPARISON:** Match if same amount OR if one appears to be per-sqm rate that equals the other when calculated
+
+"Year 3 : Monthly Amount of service" - **SMART AMOUNT COMPARISON:** Match if same amount OR if one appears to be per-sqm rate that equals the other when calculated
+
+**REQUIREMENT**: The response MUST be a JSON array containing comparison results for ALL Year 2 and Year 3 fields mentioned above.
+
+Return format (JSON ARRAY):
+[
+  {
+    "field": "Year 2 : Contract Start date",
+    "pdf": "PDF value", 
+    "web": "Web value",
+    "match": true or false,
+    "reason": "Date comparison explanation"
+  }
+  // ... continue for ALL Year 2 and Year 3 fields
+]

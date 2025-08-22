@@ -1,0 +1,44 @@
+Validate business rules for PERMANENT FIXED contracts from WEB scraped data. Return JSON array of validation results.
+
+Web-specific business rule validation:
+
+"Tenant type" - **CONTEXT-BASED MATCHING:** Validate that Tenant type (from PDF) contextually matches "Space Design Type" (from web data). The matching should be by context/meaning, not exact string match. Examples of valid matches:
+  - "PN Local - Health & Beauty" (PDF Tenant type) matches "PNL2 - PN Local - Health & Beauty" (web Space Design Type)
+  - "PN Fashion" (PDF) matches "PN Fashion - Apparel" (web)  
+  - "PN Food Court" (PDF) matches "PN Food Court - Restaurant" (web)
+  Focus on the meaningful tenant category, ignoring format differences like codes, prefixes, or suffixes. If contextual match found: valid "Tenant type contextually matches Space Design Type". If no contextual match: invalid "Tenant type ('<value>') does not contextually match Space Design Type ('<Space Design Type>')"
+
+"Building ID" - Validate 4-digit format from web source
+
+"อยู่กองทรัสต์หรือไม่" - Cross-reference with Building ID from web data (if starts with "00" = "Yes")
+
+"Brand Name" - Must exist in web Master_PT.xlsx reference (if available via web API)
+
+"Customer Type" - Validate Individual vs Corporate from web customer information
+
+"Unit Status" - Validate unit availability and lease status from web data
+
+**WEB-SPECIFIC BUSINESS RULES:**
+- Web data source validation (ensure data comes from authenticated Simplicity session)
+- Cross-reference web unit information with building database
+- Validate lease dates are future-dated and logical
+- Check for conflicts with existing web lease records
+
+**LO/LR BUSINESS VARIATIONS:**
+- **LR CONTRACT RULE**: Renewal contracts may have relaxed validation on certain business rules
+- **LO CONTRACT RULE**: New lease offers require stricter business rule validation
+
+**WEB DATA INTEGRITY:**
+- Validate web session was active during scraping
+- Check for complete data extraction (no partial records)
+- Verify web data freshness (not cached or stale data)
+
+Return format:
+[
+  {
+    "field": "Field name",
+    "value": "Web extracted value",
+    "valid": true or false,
+    "reason": "Web business rule explanation"
+  }
+]

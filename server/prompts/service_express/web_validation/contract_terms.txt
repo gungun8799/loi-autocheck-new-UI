@@ -1,0 +1,43 @@
+Validate contract terms for SERVICE EXPRESS contracts from WEB scraped data. Return JSON array of validation results.
+
+**CONTRACT TERMS VALIDATION** - Lease details and classifications:
+
+"Customer Type" - Must be present (Corporate, Individual, etc.)
+
+"Space Design Type" - Must be present and similar by context to "Tenant Type" field from PDF extraction. Validate consistency between space design classification and tenant business category
+
+"Proposed lease commencement date" - Must be present as valid date
+
+"Proposed lease expiry date" - Must be present as valid date
+
+"Billing option" - Must be "Calendar Month" for Service Express contracts
+
+"Billing Frequency" - Must be "Monthly" for Service Express contracts
+
+"Payment Term" - Must be "due in 7 days" for Service Express contracts. **LR CONTRACT EXCEPTION**: If contract number contains "LR", mark as valid even if NULL
+
+"Rental Ratio" - Must be "0" for Service Express contracts
+
+"Lease property tax" - Must be empty/null for Service Express contracts
+
+"Lease Type" - just mark as valid
+
+**WEB-SPECIFIC RULES:**
+- Web data may have different field names than PDF
+- Focus on lease term completeness from web scraping
+- Allow for date format differences
+- Validate that lease period and classifications are captured
+
+**LO/LR CONTRACT VARIATIONS:**
+- **LR CONTRACT RULE**: For LR (renewal) contracts, dates may show renewal periods
+- **LO CONTRACT RULE**: For LO (new) contracts, dates should show initial lease period
+
+Return format:
+[
+  {
+    "field": "Field name",
+    "value": "Web extracted value",
+    "valid": true or false, 
+    "reason": "Validation explanation"
+  }
+]

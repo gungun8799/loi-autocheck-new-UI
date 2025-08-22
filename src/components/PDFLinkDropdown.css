@@ -1,0 +1,155 @@
+/* PDF Dropdown Styles */
+.pdf-dropdown-container {
+  position: relative;
+  display: inline-block;
+}
+
+.pdf-dropdown-trigger {
+  background: white;
+  color: #0071cd;
+  border: 1px solid #0071cd;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.pdf-dropdown-trigger:hover {
+  background: #0071cd;
+  color: white;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(0, 113, 205, 0.2);
+}
+
+.pdf-single-link {
+  background: white;
+  border: 1px solid #0071cd;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: #0071cd;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.pdf-single-link:hover {
+  background: #0071cd;
+  color: white;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(0, 113, 205, 0.2);
+}
+
+.pdf-loading {
+  color: #666;
+  font-size: 12px;
+  font-style: italic;
+}
+
+.pdf-not-found {
+  color: #999;
+  font-size: 12px;
+}
+
+.pdf-dropdown-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  background: white;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  min-width: 400px;
+  max-width: 500px;
+  max-height: 400px;
+  overflow-y: auto;
+  z-index: 1000;
+}
+
+.pdf-dropdown-header {
+  padding: 10px 12px;
+  background: #f5f5f5;
+  border-bottom: 1px solid #ddd;
+  font-weight: bold;
+  font-size: 13px;
+  color: #333;
+}
+
+.pdf-dropdown-item {
+  padding: 10px 12px;
+  border-bottom: 1px solid #eee;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.pdf-dropdown-item:hover {
+  background: #f8f8f8;
+}
+
+.pdf-dropdown-item:last-child {
+  border-bottom: none;
+}
+
+.pdf-item-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.pdf-filename {
+  font-weight: 500;
+  color: #333;
+  font-size: 13px;
+}
+
+.pdf-status {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.pdf-item-details {
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+  color: #666;
+  margin-bottom: 2px;
+}
+
+.pdf-item-path {
+  font-size: 10px;
+  color: #999;
+  font-family: monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pdf-date {
+  white-space: nowrap;
+}
+
+.pdf-size {
+  white-space: nowrap;
+}
+
+.pdf-processed-date {
+  white-space: nowrap;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .pdf-dropdown-menu {
+    min-width: 300px;
+    max-width: 90vw;
+    left: auto;
+    right: 0;
+  }
+}

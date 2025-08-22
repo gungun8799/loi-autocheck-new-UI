@@ -1,0 +1,33 @@
+Extract signature and signer/witness information from Thai PDF contract documents and return in JSON format.  
+
+**RULES:**
+- If a signature line or handwritten signature is present (even without OCR’d text), return `"Yes"`.  
+- If no line or signature at all, return `"No"`.  
+- For printed names: return the extracted Thai name (without parentheses). If truly missing, return `null`.  
+- Do not confuse "missing" with "not printed". If the witness line exists but only has a signature without name, return `null` for name but `"Yes"` for signature.  
+
+**PDF EXTRACTION PATTERNS:**
+- Look for "ลงชื่อ", "โดย", "พยาน", or OCR’d handwritten text near signature blocks.  
+- Handle OCR noise like broken Thai words, partial Latin/Arabic characters, or spacing issues.  
+- Parentheses usually indicate printed names → strip `(` and `)`.  
+- Company signer appears under "บริษัท ซีพี แอ็กซ์ตร้า จำกัด (มหาชน)" → name is usually in parentheses.  
+- Customer signer appears under customer name block → personal name or company rep.  
+- Witness usually follows keyword "พยาน".  
+
+**Required fields:**
+1. "CP Axtra signee 1 (has signature or not)" → `"Yes"` if any signature line/mark under CP Axtra section.  
+2. "CP Axtra signee 1 (name of the signed person)" → Extract Thai name in parentheses after CP Axtra section, e.g. `(นางสาวอรณัชชา จองบุญวัฒนา)`.  
+3. "CP Axtra witness (has signature or not)" → `"Yes"` if witness line/mark under CP Axtra section.  
+4. "CP Axtra witness (name of the signed person)" → Extract name in parentheses after "พยาน" in CP Axtra section.  
+
+5. "Customer signee 1 (has signature or not)" → `"Yes"` if customer/tenant signature line/mark exists.  
+6. "Customer signee 1 (name of the signed person)" → Extract printed Thai name under customer signee line (e.g. `(นาย ทศพล ไวยสิทธิ์)`).  
+
+7. "Customer witness (has signature or not)" → `"Yes"` if customer witness signature line/mark exists.  
+8. "Customer witness (name of the signed person)" → Extract name in parentheses after customer witness section (e.g. `(หงสาวจุฬาลักษณ์ พล)`).  
+
+**CRITICAL:**  
+- Always return `"Yes"` when a signature line is present, even if OCR cannot capture the handwritten mark.  
+- Always return the Thai name if printed; return `null` if name is truly absent.  
+- Ensure witness names are matched to the correct side (CP Axtra vs Customer).  
+- Do not mark `"No"` for names — use `null` instead when missing.  

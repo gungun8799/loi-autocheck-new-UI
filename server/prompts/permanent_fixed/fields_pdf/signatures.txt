@@ -1,0 +1,45 @@
+Extract signature information and return in JSON format. If a signature line is present, return true; if no signature line at all, return false. For printed names, if missing, return null.
+
+**PDF EXTRACTION PATTERNS:**
+Extract data from Thai PDF contract documents with OCR text, handling spaced text and document structure.
+
+Required fields:
+"CP Axtra signee 1 (has signature or not)" - **LO/LR PATTERNS:** Look for CP Axtra signature:
+1. **LO Contracts**: Look in final signature pages or agreement acceptance sections
+2. **LR Contracts**: Look near "บริษัท ซีพี เอ็กซ์ตร้า จำกัด (มหาชน)" or company section
+3. Look for signature lines, "โดย" markings, or actual handwritten signatures
+4. Values: "Yes" if signature/line present, "No" if missing
+"CP Axtra signee 1 (name of the signed person)" - **LO/LR PATTERNS:** Extract CP Axtra signer name:
+1. **LO Contracts**: Look in signature/approval sections for authorized representative names
+2. **LR Contracts**: Look for name in parentheses after "บริษัท ซีพี เอ็กซ์ตร้า" and "โดย"
+3. Common names: "ณฐวรรณ อินสว่าง" or similar authorized signers
+4. Extract name without parentheses, return null if not found
+
+"CP Axtra witness (has signature or not)" - **LO/LR PATTERNS:** Look for CP Axtra witness signature:
+1. **LO Contracts**: Look in signature sections for witness signatures after main CP Axtra signer
+2. **LR Contracts**: Look for "โดย" followed by "พยาน" after CP Axtra signee section
+3. Multiple "โดย" lines indicate signature structure
+4. Values: "Yes" if witness signature/line present, "No" if missing
+"CP Axtra witness (name of the signed person)" - **PDF PATTERNS:** After CP Axtra signee, look for witness name in parentheses under "พยาน" in CP Axtra section. This is typically the same person "(ณฐวรรณ อินสว่าง)". Extract without parentheses
+
+"Customer signee 1 (has signature or not)" - **LO/LR PATTERNS:** Look for customer signature:
+1. **LO Contracts**: Look in final agreement sections for customer/tenant signatures:
+   - Individual customers: Personal signatures
+   - Corporate customers: Authorized representative signatures
+2. **LR Contracts**: Look under customer company name for "โดย" + signature marks
+3. Check for actual handwritten signatures or signature lines
+4. Values: "Yes" if signature present, "No" if missing
+"Customer signee 1 (name of the signed person)" - **LO/LR PATTERNS:** Extract customer signer name:
+1. **LO Contracts**: Look for signer names in multiple locations:
+   - Individual customers: Personal name from ID cards or registration
+   - Corporate customers: Authorized representative from company certificate
+   - Signature sections with printed names
+2. **LR Contracts**: Look for names in parentheses under customer company section
+3. **CRITICAL**: Many customer names are NOT clearly printed - return null if not found
+
+"Customer witness (has signature or not)" - **LO/LR PATTERNS:** Look for customer witness signature:
+1. **LO Contracts**: Look in signature sections for witness signatures after customer signer
+2. **LR Contracts**: Look for "โดย" + "พยาน" after customer section
+3. Multiple "โดย" lines indicate witness structure
+4. Values: "Yes" if witness signature/line present, "No" if missing
+"Customer witness (name of the signed person)" - **PDF PATTERNS:** Look for witness names in parentheses in the customer witness section (after customer signee). **CRITICAL:** Customer witness names are often NOT printed. If no clear name in parentheses for customer witness, return null (not "No"). Note: "(วริยา ประภานนท์)" may be CP Axtra's second witness, not customer witness

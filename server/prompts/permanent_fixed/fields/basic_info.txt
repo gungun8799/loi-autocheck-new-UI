@@ -1,0 +1,81 @@
+Extract basic contract information for PERMANENT FIXED contracts and return in JSON format. Focus on accuracy and extract only what is clearly visible.
+
+Required fields:
+"Building Name" - **LO/LR PATTERNS**: Look for building names in multiple locations:
+1. **LO Contracts**: "บมจ. ซีพี แอ็กซ์ตร้า พระราม 2 (5009)" in contract header
+2. **LR Contracts**: "บมจ. ซีพี เอ็กซ์ตร้า บางปะกง (5114)" in contract header
+3. Extract only the building name part, exclude the ID in parentheses
+
+"Building ID" - **LO/LR PATTERNS**: Extract 4-digit building ID from parentheses in building name (e.g., "(5009)", "(5114)")
+
+"อยู่กองทรัสต์หรือไม่" - If Building ID starts with "00" put "Yes", otherwise "No"
+
+"แบบสัญญากองทรัสต์" - If "อยู่กองทรัสต์หรือไม่" is "Yes", contract must contain "ทรัสต์เพื่อการลงทุน" or similar phrase to be valid, otherwise always valid
+
+"Contract Number" - **LO/LR PATTERNS**: 
+1. **LO Contracts**: Look for "xxxx_LOxxxx_xxxxx" format in multiple locations:
+   - In header/title section
+   - Near "เลขที่สัญญา" or "Contract No."
+   - In quotation reference sections
+2. **LR Contracts**: Look for "xxxx_LRxxxx_xxxxx" format in contract header
+3. Extract complete contract number including underscores
+
+"Brand Name" - **LO/LR PATTERNS**: Look for brand/shop name in multiple sections:
+1. **LO Contracts**: Often in tenant selection pages or quotation sections
+2. **LR Contracts**: Usually in main contract header
+3. Look for "ชื่อร้าน", "แบรนด์", "Brand Name", or business name
+
+"Property Type" - **LO/LR PATTERNS**: Extract property category:
+1. **LO Contracts**: Look in quotation details or tenant selection pages
+2. **LR Contracts**: Usually in contract terms section
+3. Common values: "Hypermarket", "Go Fresh", "Community Mall", "Fashion", "Food Court"
+
+"Customer Name" - **LO/LR PATTERNS**: 
+1. **LO Contracts**: Look for customer name in multiple sections:
+   - Individual customers: "นาย", "นาง", "นางสาว" + full name
+   - Corporate customers: Company name with "บริษัท", "จำกัด", "Co., Ltd."
+   - Check quotation recipient or tenant selection pages
+2. **LR Contracts**: Usually in main contract header after "ผู้เช่า"
+3. Extract complete name including titles
+
+"Customer Address" - **LO/LR PATTERNS**:
+1. **LO Contracts**: Look for address in:
+   - Individual ID sections
+   - Company registration sections
+   - Quotation delivery address
+2. **LR Contracts**: Usually follows customer name in contract
+3. Extract complete address including sub-district, district, province, postal code
+
+"Individual or Corporate" - Analyze Customer Name: if clearly a person's name (given name + surname, no business identifiers) = "Individual"; if contains business terms like "Co.", "Ltd.", "Inc.", "Corporation" = "Corporate"; if uncertain = "—"
+
+"แนบหนังสือรับรองบริษัท" - If "Individual or Corporate" is "Corporate", check if PDF includes corporate certificate document or "หนังสือรับรองความเป็นนิติบุคคล": present = "Yes", not present = "No". If "Individual" = mark as valid with reason "Individual customer"
+
+"Unit ID" - **LO/LR PATTERNS**: Look for unit designation:
+1. **LO Contracts**: Often in quotation details or space allocation sections
+2. **LR Contracts**: Usually in lease terms section
+3. Format: "PXXXX" where X represents numbers (e.g., "P2027", "P1234")
+4. May also appear as "หน่วย" or "Unit"
+
+"Space (NLA)" - **LO/LR PATTERNS**: Extract leased area:
+1. **LO Contracts**: Look in space details or quotation sections
+2. **LR Contracts**: Usually in lease terms
+3. Look for "ตารางเมตร", "ตร.ม.", "sq.m.", "NLA", or "พื้นที่"
+4. Extract numerical value only (e.g., "50.5" from "50.5 ตร.ม.")
+
+"Proposed lease commencement date" - **LO/LR PATTERNS**: 
+1. **LO Contracts**: Look in quotation terms or lease start sections
+2. **LR Contracts**: Usually in contract terms
+3. Look for "วันที่เริ่มต้น", "เริ่มสัญญา", "Commencement Date"
+4. **CALENDAR CONVERSION**: Convert Buddhist year to Gregorian (subtract 543)
+5. Format: YYYY-MM-DD
+
+**DERIVED FINANCIAL FIELDS (computed from lease terms data):**
+"Monthly Rental Rate" - Extract from Year 1 Monthly Amount of rent or monthly rent value
+"Monthly Service Rate" - Extract from Year 1 Monthly Amount of service or monthly service value  
+"Rental Deposit" - Extract from Total Rent Deposits value
+"Service Deposit" - Extract from Total Service Deposits value
+"Net Rent (p.m.)" - Use Monthly Rental Rate value
+"Lease Type" - **FIXED VALUE**: Always "Permanent Fixed" for permanent_fixed contract processing. DO NOT extract from document. Ignore "Type: PN Service" or similar patterns - those are Tenant Type, not Lease Type
+"Tenant Type" - Extract from Property Type or business category description
+
+"Proposed lease expiry date" - End date of lease

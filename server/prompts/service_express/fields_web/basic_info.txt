@@ -1,0 +1,59 @@
+Extract basic contract information for SERVICE EXPRESS contracts from WEB scraped data and return ONLY a valid JSON object. No explanations, no text, just JSON.
+
+**CRITICAL: Your entire response must be a single JSON object starting with { and ending with }**
+
+Required fields:
+"Building Name" - Extract building name from web interface building selection or location data
+
+"Building ID" - Extract 4-digit building ID from building information or selection fields
+
+"อยู่กองทรัสต์หรือไม่" - If Building ID starts with "00" put "Yes", otherwise "No"
+
+"แบบสัญญากองทรัสต์" - If "อยู่กองทรัสต์หรือไม่" is "Yes", check for trust-related indicators, otherwise always valid
+
+"Contract Number" - **WEB EXTRACTION PATTERNS:**
+1. Look for contract numbers in form fields, headers, or opportunity numbers
+2. Format: "xxxx_LOxxxx_xxxxx" or "xxxx_LRxxxx_xxxxx" 
+3. Check fields labeled: "Opportunity", "Lease Offer", "Contract Reference"
+4. **EXAMPLES**: "5066_LO2401_00123", "5036_LR2412_00456"
+
+"Brand Name" - Extract from brand/tenant name fields in web forms
+
+"Property Type" - Extract from property type selections or dropdowns
+
+"Customer Name" - Extract from customer information fields
+
+"Customer Address" - Extract from customer address fields
+
+"Individual or Corporate" - Analyze Customer Name: if clearly a person's name (given name + surname, no business identifiers) = "Individual"; if contains business terms like "Co.", "Ltd.", "Inc.", "Corporation" = "Corporate"; if uncertain = "—"
+
+"แนบหนังสือรับรองบริษัท" - For web data, typically not available, mark as "Not applicable for web data"
+
+"Unit ID" - Extract from unit selection fields (Format: PXXXX where x is number)
+
+"Space (NLA)" - Extract area in square meters from space details table
+
+"Tenant Type" - **WEB EXTRACTION from Space Design Type field**: Extract from "Space Design Type" column in lease spaces table. Format: "CODE - DESCRIPTION" pattern (e.g., "PNT - PN RG Trendy Plaza")
+
+"Proposed lease commencement date" - Extract from lease period fields
+
+"Proposed lease expiry date" - Extract from lease period fields
+
+**DERIVED FINANCIAL FIELDS (from web rental schedule):**
+"Monthly Rental Rate" - Extract from "Gross Rent (p.m.)" or similar fields in rental schedule
+"Monthly Service Rate" - Extract from service rate fields in rental schedule  
+"Total Deposits" - Extract from deposit fields (Service Express may have combined deposits)
+"Net Rent (p.m.)" – WEB EXTRACTION RULES:
+1. Ignore the value under "Net Rent (p.m.)" in the Rental Schedule table if it is 0.00.
+2. Instead, use the "Monthly Amount" from the Monthly Charges section that corresponds to the main rental (not service charges).
+3. Match the correct row by lease period or unit if present.
+4. Output the value as a number with 2–4 decimal places.
+5. If Monthly Charges section is missing, return NULL."Lease Type" - **ALWAYS "Service Express"** for Service Express contracts
+
+**CRITICAL JSON FORMATTING REQUIREMENTS:**
+1. ALWAYS return ONLY a valid JSON object - NOTHING ELSE
+2. ALWAYS use double quotes for all strings  
+3. DO NOT include any text, explanations, or markdown before or after the JSON
+4. DO NOT use <think> tags, comments, or reasoning
+5. DO NOT wrap in ```json``` code blocks
+6. Your response must start with { and end with }

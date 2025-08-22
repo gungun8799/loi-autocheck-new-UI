@@ -1,0 +1,25 @@
+Validate business rules (Part 1/5) for SERVICE EXPRESS contracts from WEB scraped data. Return JSON array of validation results.
+
+**BUSINESS RULES VALIDATION (Part 1 - Billing Frequency):**
+
+"Billing Frequency" - Must be "Monthly" if present. Mark as valid if NULL for LR contracts
+
+**WEB-SPECIFIC RULES:**
+- Web data may have different field names than PDF
+- Focus on numerical value validation and format checking
+- Allow for web formatting differences (currency symbols, commas, etc.)
+- Validate that core business data is captured from web source
+
+**LO/LR CONTRACT VARIATIONS:**
+- **LR CONTRACT RULE**: For LR (renewal) contracts, some fields may be abbreviated or NULL
+- **LO CONTRACT RULE**: For LO (new) contracts, all fields should be complete
+
+Return format:
+[
+  {
+    "field": "Field name",
+    "value": "Web extracted value",
+    "valid": true or false,
+    "reason": "Validation explanation"
+  }
+]

@@ -1,0 +1,50 @@
+Compare Year 1 lease terms between PDF and Web sources. Return JSON array of comparison results.
+
+**INTELLIGENT DATE COMPARISON:**
+When comparing dates, MUST handle different calendar systems and formats:
+
+- Thai Buddhist dates (e.g., "30 มิถุนายน 2570") = Gregorian dates - 543 years
+- Convert Buddhist years to Gregorian: 2570 - 543 = 2027
+- "30 มิถุนายน 2570" = "30-Jun-2027" = EXACT MATCH
+- Compare actual calendar dates, not text format
+- Account for different date formats: "DD-MMM-YYYY", "DD/MM/YYYY", Thai Buddhist format
+
+**CRITICAL**: If dates represent the same calendar date after conversion, set "match": true regardless of format differences
+
+Compare these Year 1 fields:
+
+"Year 1 : Contract Start date" - **SMART DATE COMPARISON:** Convert Thai Buddhist to Gregorian, set "match": true if same calendar date, "match": false if different dates
+
+"Year 1 : Contract End date" - **SMART DATE COMPARISON:** Convert Thai Buddhist to Gregorian, set "match": true if same calendar date, "match": false if different dates
+
+"Year 1 : Charge Type" - Compare meaning: both fixed rate OR both variable rate = match
+
+"Year 1 : Monthly Amount of rent" - **SMART AMOUNT COMPARISON:** Match if same amount OR if one appears to be per-sqm rate that equals the other when calculated (e.g., 101.4024 * area ≈ 9,937.44)
+
+"Year 1 : Monthly Amount of service" - **SMART AMOUNT COMPARISON:** Match if same amount OR if one appears to be per-sqm rate that equals the other when calculated
+
+**EXAMPLE DATE CONVERSIONS:**
+- "30 มิถุนายน 2570" vs "30-Jun-2027" → Same calendar date → "match": true ✅
+- "1 กรกฎาคม 2568" vs "01-Jul-2025" → Same calendar date → "match": true ✅  
+- Handle Thai months: มกราคม=Jan, กุมภาพันธ์=Feb, มีนาคม=Mar, เมษายน=Apr, พฤษภาคม=May, มิถุนายน=Jun, กรกฎาคม=Jul, สิงหาคม=Aug, กันยายน=Sep, ตุลาคม=Oct, พฤศจิกายน=Nov, ธันวาคม=Dec
+
+**REQUIREMENT**: The response MUST be a JSON array containing comparison results for ALL Year 1 fields mentioned above.
+
+Return format (JSON ARRAY with ALL Year 1 fields):
+[
+  {
+    "field": "Year 1 : Contract Start date",
+    "pdf": "PDF value", 
+    "web": "Web value",
+    "match": true or false,
+    "reason": "Date comparison with calendar conversion if needed"
+  },
+  {
+    "field": "Year 1 : Contract End date",
+    "pdf": "PDF value", 
+    "web": "Web value",
+    "match": true or false,
+    "reason": "Date comparison with calendar conversion if needed"
+  }
+  // ... continue for ALL Year 1 fields listed above
+]

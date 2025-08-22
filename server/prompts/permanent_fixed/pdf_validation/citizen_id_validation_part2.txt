@@ -1,0 +1,33 @@
+Validate citizen ID requirements (Part 2/2 - Corporate Customers). Return ONLY JSON array.
+
+**STEP 1: Customer Type**
+Check "Customer Name": business terms (Co., Ltd., Inc.) = "Corporate"; person name = "Individual"; uncertain = "—"
+
+**STEP 2: Validation Rules**
+
+**FOR CORPORATES:**
+- Individual fields - Mark as "—" (not applicable)
+- "Company Registration Number" - **REGEX-LIKE PATTERN:** Find text matching "ทะเบียน.*เลข.*[10-15 digits]" then extract numerical sequence (10-15 digits). Example: from "ทะเบียนนิติบุคคลเลขที่ 0245555001990" extract "0245555001990"
+- "Company Certificate issued date" - **REGEX-LIKE PATTERN:** Find "ออกให้.*พ.ศ..*[4-digit year]" then extract complete date. Convert Buddhist year to Gregorian (e.g., 2568-543=2025). **VALIDATION:** Certificate must be issued MORE than 6 months ago from today (use system timestamp). Valid if older than 6 months
+- "แนบหนังสือรับรองบริษัท" - Check if PDF includes corporate certificate document or "หนังสือรับรองความเป็นนิติบุคคล": present = "Yes"/valid, absent = "No"/invalid
+- "มีตราประทับบนหนังสือรับรองบริษัทหรือไม่" - **ENHANCED STAMP DETECTION:** Look in BOTTOM 2/3 of document for ANY stamp indicators: circular/round stamps, official seals, embossed marks, red ink stamps, government stamps, "ตรา" marks, raised impressions. Even faint/partially visible stamps count. If ANY detected: "Yes"/valid, only if completely absent: "No"/invalid
+- "Citizen ID Number" - **FOR CORPORATE**: Extract 13-digit number from attached citizen ID card. Valid if exactly 13 digits. Reason: "Corporate customer - citizen ID from attached ID card: [13-digit number]"
+- "Name on Citizen ID card" - **FOR CORPORATE**: Check if name matches authorized signatory on company certificate (search "ผู้มีอำนาจลงนาม" in BOTTOM 2/3). Valid if match found. Reason: "Name matches authorized signatory" or "Name does not match"
+- "Names on Company Certificate" - **REGEX-LIKE PATTERN:** Find lines matching "นาย.*[Thai surname]" after "กรรมการ" context. Extract ALL names, format as: "1. [Name1], 2. [Name2], 3. [Name3], 4. [Name4], 5. [Name5]"
+- "Company Registered Address" - **REGEX-LIKE PATTERN:** Find "ตั้งอยู่เลขที่.*จังหวัด.*" then extract complete address
+
+**FOR INDIVIDUALS:** Return empty array [] (handled in Part 1)
+
+**DYNAMIC FIELD NAMING:** Use mixed naming - citizen fields for ID validation, company fields for certificate data
+
+Return ONLY this JSON format:
+[
+  {
+    "field": "exact field name",
+    "value": "actual value or null",
+    "valid": true/false,
+    "reason": "brief explanation"
+  }
+]
+
+IMPORTANT: Response must be valid JSON starting with [ and ending with ]

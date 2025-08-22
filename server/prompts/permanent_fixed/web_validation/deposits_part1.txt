@@ -1,0 +1,22 @@
+Validate Tenancy Deposit from WEB - PART 1 (ATM Rules). Return JSON array.
+
+Extract from Simplicity data: Contract Number, Property Type, Brand Name, Net Rent, Service Charge, Rental Deposit, Service Deposit
+Calculate: Total Deposit = Rental Deposit + Service Deposit
+Calculate: Total Monthly Amount = Net Rent + Service Charge
+
+**CHECK THESE RULES FIRST:**
+
+1. **ATM-SCB GoFresh Exception**:
+   If Brand Name contains "ATM SCB" AND Property Type is "GoFresh",
+   then deposit requirement = 0.00 (no deposit required)
+   Return: {"field":"Tenancy Deposit","value":"[total_amount]","valid":true/false,"reason":"ATM-SCB + GoFresh = No deposit required"}
+
+2. **Other ATM GoFresh Rule**:
+   If Brand Name contains "ATM" but NOT "ATM SCB" or "ATM KBANK" AND Property Type is "GoFresh",
+   then Total Deposit MUST be at least 1.00 × (Net Rent + Service Charge)
+   Return: {"field":"Tenancy Deposit","value":"[total_amount]","valid":true/false,"reason":"Other ATM + GoFresh = 1 month of total charges required (Rent+Service)"}
+
+**If neither ATM rule applies, return:**
+[{"field":"Tenancy Deposit","value":"[total_amount]","valid":null,"reason":"No ATM rules apply, check Part 2"}]
+
+Note: Handle web formatting (commas, currency symbols)

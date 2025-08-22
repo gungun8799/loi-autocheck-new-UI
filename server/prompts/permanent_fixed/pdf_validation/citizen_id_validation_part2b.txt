@@ -1,0 +1,28 @@
+Validate citizen ID requirements (Part 2b/3 - Corporate Certificate Fields). Return ONLY JSON array.
+
+**STEP 1: Customer Type**
+Check "Customer Name": business terms (Co., Ltd., Inc.) = "Corporate"; person name = "Individual"; uncertain = "—"
+
+**STEP 2: Corporate Certificate Validation (Part 2b)**
+
+**FOR CORPORATES - Certificate Fields:**
+- "Names on Company Certificate" - **ENHANCED EXTRACTION:** Look for section starting with "กรรมการของบริษัทมี" followed by director list. Extract all names that start with "นาย" (excluding any numbers). Format as comma-separated list: "[Name1], [Name2], [Name3], [Name4], [Name5]". **CRITICAL:** Must extract from company certificate document, not contract signature section
+- "Company Registered Address" - **REGEX-LIKE PATTERN:** Find text starting with "ตั้งอยู่เลขที่" or "สำนักงานแห่งใหญ่" then extract the complete address that follows. Valid if contains at least street number and district/sub-district. **IMPORTANT:** Allow minor OCR errors or misspellings (e.g., "บางปะกง" vs "บางปลาง"). If address has basic structure with number, district, province, mark as valid. Reason: "Valid company address format"
+- "แนบหนังสือรับรองบริษัท" - **BINARY OUTPUT ONLY:** Check if PDF includes corporate certificate document or "หนังสือรับรองความเป็นนิติบุคคล". **CRITICAL: Output must be EXACTLY "Yes" or "No" only**: present = "Yes"/valid, absent = "No"/invalid. **NEVER output "Individual customer" or any other text - only "Yes" or "No"**
+- "มีตราประทับบนหนังสือรับรองบริษัทหรือไม่" - **ENHANCED STAMP DETECTION:** Look for ANY of these indicators: 1) "ประทับตรา" text, 2) "ตราสำคัญ" references, 3) Official seal marks, 4) Government stamp indicators, 5) Company stamp references in certificate text. **CRITICAL:** Check company certificate pages for any stamp-related text or markings. If ANY reference found: "Yes"/valid
+
+**FOR INDIVIDUALS:** Return empty array [] (handled in Part 1)
+
+**DYNAMIC FIELD NAMING:** Use mixed naming - citizen fields for ID validation, company fields for certificate data
+
+Return format:
+[
+  {
+    "field": "Field name (use appropriate naming based on customer type)",
+    "value": "Extracted value (or null)", 
+    "valid": true or false,
+    "reason": "Explanation"
+  }
+]
+
+IMPORTANT: Response must be valid JSON starting with [ and ending with ]

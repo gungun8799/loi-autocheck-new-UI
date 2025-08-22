@@ -1,0 +1,53 @@
+Validate Tenancy Deposit for PERMANENT FIXED contracts from WEB data. Return JSON array of validation results.
+
+**CRITICAL**: Extract these values from the Simplicity web data:
+- Contract Number (to determine LR/LO type)
+- Property Type (Hypermarket, Value, Department, Supermarket, GoFresh, etc.)
+- Brand Name (check for ATM-SCB, ATM-KBANK, etc.)
+- Net Rent Amount (monthly rental amount)
+- Rental Deposit Amount
+- Service Deposit Amount
+- Total Tenancy Deposit (Rental + Service deposits)
+
+**DEPOSIT VALIDATION RULES:**
+
+1. **LR + Big Tenant Rule**: 
+   If contract starts with "LR" AND Property Type suggests big/anchor tenant, 
+   then Total Deposit MUST equal 3.00 × Net Rent
+
+2. **LO + Non-Qualified + Major Property Rule**:
+   If contract starts with "LO" AND Property Type is "Hypermarket" OR "Value" OR "Department",
+   then Total Deposit MUST equal 4.00 × Net Rent
+
+3. **Local Tenant + Master Cell Rule**:
+   If (LR OR LO) AND tenant appears to be local/small tenant with cell location,
+   then Total Deposit MUST equal 2.00 × Net Rent
+
+4. **Local Tenant + Small Format Rule**:
+   If (LR OR LO) AND local tenant AND Property Type is "Supermarket" OR "GoFresh",
+   then Total Deposit MUST equal 2.00 × Net Rent
+
+5. **ATM-SCB GoFresh Exception**:
+   If Brand Name contains "ATM SCB" AND Property Type is "GoFresh",
+   then deposit requirement = 0.00 (no deposit required)
+
+6. **Other ATM GoFresh Rule**:
+   If Brand Name is NOT "ATM SCB" AND NOT "ATM KBANK" AND Property Type is "GoFresh",
+   then Total Deposit MUST equal 1.00 × Net Rent
+
+**DEFAULT RULE**: If none of the above apply, Total Deposit MUST equal 3.00 × Net Rent
+
+**WEB-SPECIFIC NOTES:**
+- Total Deposit = Rental Deposit + Service Deposit (if both present)
+- Handle web formatting (commas, currency symbols)
+- Check both individual deposits and total
+
+Return format:
+[
+  {
+    "field": "Tenancy Deposit",
+    "value": "total_deposit_amount",
+    "valid": true/false,
+    "reason": "Applied rule: [specific rule] - Expected X months (amount), Found: Y"
+  }
+]

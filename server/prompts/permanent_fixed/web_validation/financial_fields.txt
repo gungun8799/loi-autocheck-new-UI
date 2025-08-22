@@ -1,0 +1,33 @@
+Validate financial fields for PERMANENT FIXED contracts from WEB scraped data. Return JSON array of validation results.
+
+**FINANCIAL FIELDS VALIDATION** - Rental rates and financial terms:
+
+"Space (NLA)" - Must be present as numerical value
+
+"Monthly Rental Rate" - Must be present as numerical value (may appear twice in list, validate both instances)
+
+"Monthly Service Rate" - Must be present as numerical value
+
+"Rental Deposit" - Must be present as numerical value
+
+"Service Deposit" - Must be present as numerical value
+
+**WEB-SPECIFIC RULES:**
+- Web data may have different field names than PDF
+- Focus on numerical value presence and formatting
+- Allow for web formatting differences (currency symbols, commas, etc.)
+- Validate that financial amounts are properly extracted
+
+**LO/LR CONTRACT VARIATIONS:**
+- **LR CONTRACT RULE**: For LR (renewal) contracts, rates may reference previous terms
+- **LO CONTRACT RULE**: For LO (new) contracts, all rates should be explicitly stated
+
+Return format:
+[
+  {
+    "field": "Field name",
+    "value": "Web extracted value", 
+    "valid": true or false,
+    "reason": "Validation explanation"
+  }
+]

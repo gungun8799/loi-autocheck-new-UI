@@ -1,0 +1,20 @@
+Validate business rules (Part 6/6) for PERMANENT FIXED contracts from WEB scraped data. Return JSON array of validation results.
+
+**BUSINESS RULES VALIDATION (Part 6 - Tenant Selection):**
+
+"Tenant selection" - Must be present and non-empty
+
+**WEB-SPECIFIC RULES:**
+- Web data may have different field names than PDF
+- Focus on text validation and completeness
+- Validate that core business data is captured from web source
+
+Return format:
+[
+  {
+    "field": "Field name",
+    "value": "Web extracted value",
+    "valid": true or false,
+    "reason": "Validation explanation"
+  }
+]

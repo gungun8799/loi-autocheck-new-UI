@@ -1,0 +1,33 @@
+Extract tenant-related information from PDF data and return in JSON format.
+
+Required fields:
+"Tenant Type" - **PDF PATTERNS:** Look for "Type:" followed by category (e.g., "Type: PN Health & Beauty"). Also check near Unit Number sections.
+1. **PRIMARY PATTERN FOR LO CONTRACTS**: Look for the word "Type:" followed by space and then the business category value
+   - **SURROUNDING CONTEXT**: This pattern appears in a block that contains:
+     * Line above or nearby: "Unit:" followed by unit code
+     * Target line: "Type:" followed by the value to extract
+     * Line below or nearby: "Lease No:" followed by contract number
+2. **EXTRACTION RULE**: Extract the complete business category after "Type:"
+   - Example: "Type: PN Service" → extract "PN Service"
+   - Example: "Type: PN Health & Beauty" → extract "PN Health & Beauty"
+3. **CONTEXT VALIDATION**: Ensure this appears in the tenant information section of the contract
+
+"Tenant selection" - **PDF PATTERNS:** Look for tenant selection status in contract. Check for approval stamps or markings. Default to "No" if not specified.
+
+"Big Tenant" - Put "No" for now
+
+"Space Design Type" - **PDF PATTERNS:** Should match the "Tenant Type" field context for validation consistency
+
+"Billing Frequency" - **PDF PATTERNS:** Look for billing frequency information in Thai text. Common patterns:
+1. Look for "ต่อเดือน" (per month) which indicates "Monthly"
+2. Look for billing period specifications in the contract
+3. Extract frequency terms from payment schedule sections
+
+"Monthly rental rate" - **PDF PATTERNS:** Look for "ค่าเช่า" followed by amount and "ต่อเดือน". Extract the numeric value, this field must never be NULL so if you're not sure select the highest value you found.
+
+"Monthly Service Rate" - **SERVICE EXPRESS EXTRACTION PATTERNS:**
+
+**PDF DATA PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "ในอัตราเดือนละ" followed by amount and "บาท"
+   - Example: "ในอัตราเดือนละ 5,000.00 บาท" → extract "5000.00"
+2. **SECONDARY PATTERN**: Look for "ค่าบริการ" followed by amount and "ต่อเดือน"

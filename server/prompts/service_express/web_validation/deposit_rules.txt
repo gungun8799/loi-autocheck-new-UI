@@ -1,0 +1,10 @@
+Validate deposit amounts for SERVICE EXPRESS contracts from WEB scraped data. Return JSON array of validation results.
+
+**IMPORTANT**: Rental Deposit and Service Deposit fields have been removed from Service Express contracts.
+
+**SERVICE EXPRESS RULES:**
+- Service Express contracts no longer validate deposit fields
+- These fields are not applicable to this contract type
+
+Return format:
+[]

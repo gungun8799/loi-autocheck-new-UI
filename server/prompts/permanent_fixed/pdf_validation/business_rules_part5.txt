@@ -1,0 +1,17 @@
+Validate business rules (Part 5/5) and return JSON array of validation results.
+
+Validation Rules (Part 5 - Deposits):
+
+"Rental Deposit" - Valid if numeric and ≥ 0. If null/non-numeric/< 0: invalid "Rental Deposit ('<value>') is not a valid number". Else valid "Rental Deposit is valid"
+
+"Service Deposit" - Valid if numeric and ≥ 0. If null/non-numeric/< 0: invalid "Service Deposit ('<value>') is not a valid number". Else valid "Service Deposit is valid"
+
+Return format:
+[
+  {
+    "field": "Field name", 
+    "value": "Extracted value (or null)",
+    "valid": true or false,
+    "reason": "Explanation"
+  }
+]

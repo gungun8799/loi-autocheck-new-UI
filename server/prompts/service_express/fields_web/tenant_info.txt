@@ -1,0 +1,107 @@
+Extract tenant-related information from WEB scraped data and return in JSON format.
+
+Required fields:
+"Tenant Type" - **WEB PATTERNS:** Usually near Unit Number starting with "PN". Extract text after first dash "-". Example: "PN3 - PN Car Service & Maintenance" → return "PN Car Service & Maintenance". If no "PN" prefix, still extract text after dash.
+
+"Tenant selection" - Put "No" for now
+
+"Big Tenant" - Put "No" for now
+
+"Space Design Type" - **WEB PATTERNS:** Extract space design classification from tabular data:
+1. Look in "Lease Spaces" section in the space details table
+2. Find "Space Design Type" column in the table with columns like "Space", "NLA", "Space Design Type"
+3. Common values: "PN Local - Health & Beauty", "PN Fashion", "PN Food Court", etc.
+4. Extract the complete value including "PN" prefix and category description
+
+"Billing Options" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Billing Option:" (case insensitive) followed by the selected value
+   - Context: In "Recurring Billing" section near "Billing Frequency" and "Payment Term"
+   - Pattern: Find "Billing Option:" then extract the first occurrence of "Calendar Month" or "Anniversary Month" that follows
+   - Handle variations: "BillingOption:", "billing option:", "Billing_Option:", etc.
+2. **SELECTION LOGIC**: When both options are present in text, the one appearing first after "Billing Option:" is the selected value
+   - Example: "Billing Option: Calendar Month [newlines] Anniversary Month" → select "Calendar Month"  
+   - Example: "Billing Option: Anniversary Month [newlines] Calendar Month" → select "Anniversary Month"
+3. **FLEXIBLE MATCHING**: Handle various formatting scenarios:
+   - Different spacing: "Calendar Month", "CalendarMonth", "Calendar_Month"
+   - Case variations: "calendar month", "CALENDAR MONTH", "Calendar Month"
+   - Extra whitespace, tabs, newlines between "Billing Option:" and the selection
+4. **FORMAT**: Always return exactly "Calendar Month" or "Anniversary Month" (normalized case) as the selected option
+
+"Billing Frequency" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Billing Frequency:" (case insensitive) followed immediately by the frequency word
+   - Context: In "Recurring Billing" section near "Billing Option" and "Payment Term"
+   - Pattern: "Billing Frequency:" then extract the first word that follows (excluding whitespace and punctuation)
+   - Example: "Billing Frequency: Monthly" → extract "Monthly"
+   - Example: "Billing Frequency: Weekly Payment Term:" → extract "Weekly" (stops at first word)
+2. **FLEXIBLE MATCHING**: Handle various formatting scenarios:
+   - Different spacing: "BillingFrequency:Monthly", "Billing Frequency: Monthly", "billing_frequency: weekly"
+   - Case variations: "billing frequency:", "BILLING FREQUENCY:", "Billing_Frequency:"
+   - Extra whitespace and tabs: "Billing Frequency:\t\tMonthly"
+   - Special characters: "==> Billing Frequency: <== Quarterly" → extract "Quarterly"
+3. **HTML-LIKE FORMAT**: Handle markup-style formatting:
+   - Pattern: "<label>Billing Frequency:</label> <span>Monthly</span>" → extract "Monthly"
+4. **WORD BOUNDARY LOGIC**: Extract only the frequency term, not subsequent text
+   - Stop extraction at spaces, line breaks, or special characters
+5. **FORMAT**: Return the exact frequency word as found (preserve original case)
+
+"Payment Term" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Payment Term:" (case insensitive) followed by the complete payment term phrase
+   - Context: In "Recurring Billing" section near "Billing Frequency" and "Billing Option"
+   - Pattern: "Payment Term:" then extract the payment term phrase until next field or line break
+   - Example: "Payment Term: Due in 7 days" → extract "Due in 7 days"
+   - Example: "Payment Term: Net 30 Payment Method:" → extract "Net 30" (stops at next field)
+2. **SMART BOUNDARY DETECTION**: Stop extraction at common field boundaries:
+   - Next billing fields: "Rental", "Lease", "Billing", "Payment Method"
+   - Line breaks, special characters, or end of text
+   - Avoid capturing subsequent field labels or values
+3. **FLEXIBLE MATCHING**: Handle various formatting scenarios:
+   - Different spacing: "PaymentTerm:Due in 7 days", "Payment Term: Due in 7 days", "payment_term: net 30"
+   - Case variations: "payment term:", "PAYMENT TERM:", "Payment_Term:"
+   - Extra whitespace and tabs: "Payment Term:\t\tDue in 14 days"
+   - Special characters: "==> Payment Term: <== Net 15 days" → extract "Net 15 days"
+4. **HTML-LIKE FORMAT**: Handle markup-style formatting:
+   - Pattern: "<label>Payment Term:</label> <span>Upon receipt</span>" → extract "Upon receipt"
+5. **COMMON PAYMENT TERMS**: Extract various payment term formats:
+   - "Due in X days" (e.g., "Due in 7 days", "Due in 30 days")
+   - "Net X" (e.g., "Net 30", "Net 7", "Net 15 days")
+   - Single terms: "Immediate", "COD", "Upon receipt"
+6. **FORMAT**: Return the complete payment term phrase as found (preserve original spacing and case)
+
+"Monthly rental rate" - Monthly rent amount from web data
+
+"Monthly Service Rate" - **SERVICE EXPRESS EXTRACTION PATTERNS:**
+
+**WEB DATA PATTERNS (Priority Order):**
+1. **PRIMARY PATTERN**: Look for "Gross Rent (p.m.)" followed by amount in Rental Schedule table
+   - Context: Appears in "Rental Schedule" section in tabular format
+   - Example: "Gross Rent (p.m.): 5,000.00" → extract "5000.00"
+   - This is the total monthly amount, not per-square-meter rate
+2. **SECONDARY PATTERN**: Look for "Monthly Amount" with value near "5,000.0000" 
+   - Context: Appears in Monthly Charges section
+   - Example: "Monthly Amount: 5,000.0000" → extract "5000.00"
+3. **AVOID PSMPM RATES**: DO NOT extract from "Service Charge - Fixed (psmpm)" or any "psmpm" fields
+   - These are per-square-meter rates, not total monthly amounts
+   - Example: "1,250.00" in "Service Charge - Fixed (psmpm)" is WRONG - this is per sqm rate
+4. **CONTEXT CLUES**: Look for amounts in:
+   - "Rental Schedule" table under "Gross Rent (p.m.)" column
+   - "Monthly Charges" section under "Monthly Amount"
+   - Near date ranges like "20-Jun-2025 to 19-Jun-2026"
+5. **FORMAT HANDLING**: Remove commas, preserve decimals (e.g., "5,000.00" → "5000.00")
+
+"Rental Ratio" - **WEB EXTRACTION PATTERNS:**
+1. **PRIMARY PATTERN**: Look for "Rental Ratio" with optional "(%) " followed by the numeric value
+   - Context: In "Rental Schedule" section near "Lease Property Tax"
+   - Pattern: "Rental Ratio" + optional "(%)" + ":" then extract the numeric value that follows
+   - Example: "Rental Ratio (%): 0.00" → extract "0.00" → convert to "0"
+   - Example: "Rental Ratio: 15.00" → extract "15.00" → convert to "15"
+2. **FLEXIBLE MATCHING**: Handle various formatting scenarios:
+   - Different spacing: "RentalRatio(%):0.00", "Rental Ratio (%): 0.00", "rental_ratio_(%): 10.75"
+   - Case variations: "rental ratio (%):", "RENTAL RATIO (%):", "Rental Ratio:"
+   - With/without percentage symbol: "Rental Ratio: 25.00", "Rental Ratio (%): 7.50"
+   - Extra whitespace and tabs: "Rental Ratio (%):\t\t3.25"
+3. **SMART NUMERIC CONVERSION**: Convert decimal values to simplest readable format:
+   - Whole numbers: "0.00" → "0", "15.00" → "15", "100.00" → "100"
+   - Decimals: "12.50" → "12.5", "3.25" → "3.25", "8.5" → "8.5"
+   - Preserve necessary decimal places, remove trailing zeros
+4. **CONTEXT VALIDATION**: Verify extraction is from rental schedule section between billing and lease tax fields
+5. **FORMAT**: Return the numeric value as string in simplest form (e.g., "0", "15", "12.5")

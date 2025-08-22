@@ -1,0 +1,24 @@
+**CRITICAL**: Return ONLY the JSON array below. Do NOT include explanations, thinking, or text outside the JSON. Start response with [
+
+**TASK**: Validate Tenancy Deposit using Part 2B rules (Default - Hypermarket Properties):
+
+**RULES** (final fallback rules):
+1. If "Tenancy Deposit" < 3 × "Net Rent (p.m.)": INVALID
+2. If "Tenancy Deposit" ≥ 3 × "Net Rent (p.m.)": VALID
+
+**VALIDATION LOGIC**:
+- This applies to Hypermarket properties or any properties that didn't match previous rules
+- Default requirement is 3 times the monthly rent as deposit
+- This is the final validation step in the deposit rules chain
+
+**REQUIRED RESPONSE** (exactly one object in array):
+[
+  {
+    "field": "Tenancy Deposit",
+    "value": "deposit_amount",
+    "valid": true/false,
+    "reason": "Default rule: Tenancy Deposit (amount) ≥/< 3 × Net Rent (expected) for Hypermarket/default properties"
+  }
+]
+
+**CRITICAL**: Start response immediately with [ - no other text!

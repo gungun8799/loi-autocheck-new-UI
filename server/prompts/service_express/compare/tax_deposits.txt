@@ -1,0 +1,40 @@
+Compare lease property tax information between PDF and Web sources. Return JSON array of comparison results.
+
+Compare this field:
+
+"Lease property tax rate" - always mark as match True for service_express contracts with **DECIMAL FORMAT FLEXIBILITY**.
+Validation Logic:
+- valid if empty
+
+**CRITICAL: Use exact field name "Lease property tax rate" in response**
+
+Return format:
+[
+  {
+    "field": "Lease property tax rate", 
+    "pdf": "PDF value",
+    "web": "Web value",
+    "match": true,
+    "reason": "Service Express contract - tax comparison always passes"
+  }
+]
+
+**EXAMPLE RESPONSE:**
+```json
+[
+  {
+    "field": "Lease property tax rate", 
+    "pdf": "10.00",
+    "web": "PTS-PT Standard",
+    "match": true,
+    "reason": "Service Express contract - tax comparison always passes"
+  }
+]
+```
+
+**CRITICAL REQUIREMENTS:**
+1. ALWAYS return valid JSON array
+2. ALWAYS use double quotes for all strings
+3. ALWAYS use exact field name "Lease property tax rate"
+4. DO NOT include any text before or after the JSON array
+5. DO NOT use <think> tags or explanations

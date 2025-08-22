@@ -1,0 +1,26 @@
+Validate citizen ID requirements (Part 1/2 - Individual Customers). Return ONLY JSON array.
+
+**STEP 1: Customer Type**
+Check "Customer Name": business terms (Co., Ltd., Inc.) = "Corporate"; person name = "Individual"; uncertain = "—"
+
+**STEP 2: Validation Rules**
+
+**FOR INDIVIDUALS:**
+- "Citizen ID Number" – Validation Rules:
+- "Citizen ID expiration date" - **VALIDATION RULE:** Must be **at least 6 months from today** (compute at runtime using the **Gregorian/AD** calendar). If a **Buddhist Era (BE)** year is detected (e.g., year ≥ 2400), **convert to AD by subtracting 543** before comparison (e.g., `2566-01-07` → `2023-01-07`, which is expired). If the converted expiration date is **earlier than today + 6 months** or already past, mark as **invalid**.
+- "Name on Citizen ID card" - Must match "Customer Name" (ignore titles like นาย นางสาว)
+- "Address on Citizen ID card" - Valid if present, invalid if empty
+
+**FOR CORPORATES:** Return empty array [] (handled in Part 2)
+
+Return ONLY this JSON format:
+[
+  {
+    "field": "exact field name",
+    "value": "actual value or null",
+    "valid": true/false,
+    "reason": "brief explanation"
+  }
+]
+
+IMPORTANT: Response must be valid JSON starting with [ and ending with ]

@@ -1,0 +1,49 @@
+Validate service charge date fields for PERMANENT FIXED contracts from WEB scraped data. Return JSON array of validation results.
+
+**SERVICE CHARGE DATE FIELDS** - Service charge applicable dates:
+
+"Other service charge (in the renting space) start date" - 
+**VALIDATION RULE**: Must match "Proposed lease commencement date" from web extraction data
+**DATE MATCHING**: Compare dates by context, regardless of format (DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD, etc.)
+**LOGIC**: Service charge dates should align with main contract dates
+**NULL HANDLING**: If service charge amount is 0.00 or NULL, this field should be NULL - mark as valid
+
+"Other service charge (in the renting space) end date" - 
+**VALIDATION RULE**: Must match "Proposed lease expiry date" from web extraction data
+**DATE MATCHING**: Compare dates by context, regardless of format (DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD, etc.)
+**LOGIC**: Service charge dates should align with main contract dates
+**NULL HANDLING**: If service charge amount is 0.00 or NULL, this field should be NULL - mark as valid
+
+"Other service charge (Common area) start date" - 
+**VALIDATION RULE**: Must match "Proposed lease commencement date" from web extraction data
+**DATE MATCHING**: Compare dates by context, regardless of format (DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD, etc.)
+**LOGIC**: Service charge dates should align with main contract dates
+**NULL HANDLING**: If service charge amount is 0.00 or NULL, this field should be NULL - mark as valid
+
+"Other service charge (Common area) end date" - 
+**VALIDATION RULE**: Must match "Proposed lease expiry date" from web extraction data
+**DATE MATCHING**: Compare dates by context, regardless of format (DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD, etc.)
+**LOGIC**: Service charge dates should align with main contract dates
+**NULL HANDLING**: If service charge amount is 0.00 or NULL, this field should be NULL - mark as valid
+
+**WEB-SPECIFIC RULES:**
+- Compare extracted service charge dates with contract lease dates
+- Accept different date formats but ensure the actual dates match
+- If service charge amount > 0, dates must be present and match contract dates
+- If service charge amount = 0 or NULL, dates should be NULL
+
+**VALIDATION LOGIC:**
+- Extract "Proposed lease commencement date" and "Proposed lease expiry date" from web data
+- Parse both service charge dates and contract dates to comparable format
+- Validate that service charge dates align with contract period
+- Mark as invalid if dates don't match when service charges exist
+
+Return format:
+[
+  {
+    "field": "Field name",
+    "value": "Web extracted value", 
+    "valid": true or false,
+    "reason": "Validation explanation"
+  }
+]

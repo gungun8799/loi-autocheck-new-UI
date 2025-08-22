@@ -1,0 +1,38 @@
+**SERVICE EXPRESS CONTRACTS - LIMITED SERVICE CHARGES:**
+
+Most SERVICE EXPRESS contracts do not have extensive service charges, but if service charge fields are present, apply relaxed matching rules.
+
+**ZERO VALUE EQUIVALENCE RULES:**
+
+"Other service charge before tax (in the renting space)" - **SPECIAL MATCHING:**
+- Treat these as EQUIVALENT MATCHES: "0", "0.00", "0.0", null, empty string "", "NULL", undefined
+- Logic: If either PDF or WEB is zero/empty, and the other is also zero/empty → MATCH
+- Examples:
+  * PDF="0.00" + WEB=null → MATCH (both represent no charge)
+  * PDF="" + WEB="0" → MATCH (both represent no charge)  
+  * PDF="0.00" + WEB="0.00" → MATCH (exact same)
+  * PDF="100.00" + WEB="0" → NO MATCH (different values)
+- For non-zero values, require exact numeric match after normalization
+
+Apply this same zero-equivalence logic to ALL service charge amount fields.
+
+**RELAXED CONTEXT MATCHING for any service charge descriptions:**
+- Thai "สำหรับไอเย็น และไฟฟ้า" = English "Common Area Cool Air Service Fee" → MATCH (both relate to air conditioning services)
+- Thai "ค่าบริการสำหรับไอเย็น" = English "Common Area Cool Air Service Fee" → MATCH
+- Focus on primary service type (cooling/air conditioning) rather than requiring exact component matching
+
+**IMPORTANT:** If no service charge fields are present, return empty array.
+
+Return format:
+[] (if no service charges)
+
+OR if service charges exist:
+[
+  {
+    "field": "Field name",
+    "pdf": "PDF value",
+    "web": "Web value", 
+    "match": true or false,
+    "reason": "Explanation using relaxed context matching"
+  }
+]

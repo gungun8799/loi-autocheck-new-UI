@@ -1,0 +1,67 @@
+Compare service charges between PDF and Web sources. Return JSON array of comparison results.
+
+Compare these fields:
+
+"Other service charge before tax (in the renting space)" - **ZERO VALUE EQUIVALENCE:**
+- Treat these as EQUIVALENT MATCHES: "0", "0.00", "0.0", null, empty string "", "NULL", undefined
+- Logic: If either PDF or WEB is zero/empty, and the other is also zero/empty → MATCH
+- Examples: PDF="0.00" + WEB=null → MATCH, PDF="" + WEB="0" → MATCH
+- For non-zero values, require exact numeric match after normalization
+
+"Other service charge (in the renting space) Charge description" - **ZERO CHARGE RULE:**
+- If "Other service charge before tax (in the renting space)" is 0 in BOTH sources → both description fields should be NULL for match
+- If charge amount is 0, treat any non-null description as NULL for comparison purposes
+- For non-zero charges: Often "ค่าบริการพิเศษสำหรับไอเย็นและไฟฟ้า" matches "Common Area Cool Air Service Fee" - mark as match if same meaning
+
+"Other service charge (in the renting space) start date" - **ZERO CHARGE RULE:**
+- If "Other service charge before tax (in the renting space)" is 0 in BOTH sources → both date fields should be NULL for match
+- If charge amount is 0, treat any non-null date as NULL for comparison purposes
+- For non-zero charges: should match contract start date
+
+"Other service charge (in the renting space) end date" - **ZERO CHARGE RULE:**
+- If "Other service charge before tax (in the renting space)" is 0 in BOTH sources → both date fields should be NULL for match
+- If charge amount is 0, treat any non-null date as NULL for comparison purposes
+- For non-zero charges: should match contract end date
+
+"Other service charge before tax (Common area)" - **ZERO VALUE EQUIVALENCE:**
+- Treat these as EQUIVALENT MATCHES: "0", "0.00", "0.0", null, empty string "", "NULL", undefined
+- Logic: If either PDF or WEB is zero/empty, and the other is also zero/empty → MATCH
+- For non-zero values, require exact numeric match after normalization
+
+"Other service charge (Common area) Charge description" - **ZERO CHARGE RULE:**
+- If "Other service charge before tax (Common area)" is 0 in BOTH sources → both description fields should be NULL for match
+- If charge amount is 0, treat any non-null description as NULL for comparison purposes
+- For non-zero charges: **RELAXED MATCHING BY CONTEXT:**
+  - Thai "สำหรับไอเย็น และไฟฟ้า" (air conditioning and electricity) = English "Common Area Cool Air Service Fee" → MATCH
+  - Thai "ค่าบริการสำหรับไอเย็น" = English "Common Area Cool Air Service Fee" → MATCH
+  - Thai descriptions mentioning "ไอเย็น" (air conditioning) = English "Cool Air Service Fee" → MATCH
+  - Focus on core service type (air conditioning/cooling) rather than exact component details
+
+"Other service charge (Common area) start date" - **ZERO CHARGE RULE:**
+- If "Other service charge before tax (Common area)" is 0 in BOTH sources → both date fields should be NULL for match
+- If charge amount is 0, treat any non-null date as NULL for comparison purposes
+- For non-zero charges: should match contract start date
+
+"Other service charge (Common area) end date" - **ZERO CHARGE RULE:**
+- If "Other service charge before tax (Common area)" is 0 in BOTH sources → both date fields should be NULL for match
+- If charge amount is 0, treat any non-null date as NULL for comparison purposes
+- For non-zero charges: should match contract end date
+
+Special Rules:
+- **ZERO CHARGE PRIORITY RULE**: If any "Other service charge before tax" field is 0, treat all related description and date fields as NULL for comparison
+- **RELAXED CONTEXT MATCHING**: For non-zero charges, match descriptions by core service meaning, not exact text
+- Thai "สำหรับไอเย็น และไฟฟ้า" = English "Common Area Cool Air Service Fee" → MATCH (both relate to air conditioning services)
+- Thai "ค่าบริการสำหรับไอเย็น" = English "Common Area Cool Air Service Fee" → MATCH
+- Focus on primary service type (cooling/air conditioning) rather than requiring exact component matching
+- **ZERO CHARGE LOGIC**: When comparing zero charges, ignore description and date content - treat as NULL vs NULL comparison
+
+Return format:
+[
+  {
+    "field": "Field name",
+    "pdf": "PDF value",
+    "web": "Web value", 
+    "match": true or false,
+    "reason": "Explanation of match logic"
+  }
+]

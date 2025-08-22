@@ -1,0 +1,15 @@
+Validate business rules (Part 4b/6) and return JSON array of validation results.
+
+Validation Rules (Part 4b - Monthly Service Rate):
+
+"Monthly Service Rate" - Valid if numeric and ≥ 0. If null/non-numeric/< 0: invalid "Monthly Service Rate ('<value>') is not a valid number". Else valid "Monthly Service Rate is valid"
+
+Return format:
+[
+  {
+    "field": "Field name", 
+    "value": "Extracted value (or null)",
+    "valid": true or false,
+    "reason": "Explanation"
+  }
+]

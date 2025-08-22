@@ -1,0 +1,26 @@
+Validate Tenancy Deposit from WEB - PART 2 (LO/LR Special Rules). Return JSON array.
+
+Extract: Contract Number (check if starts with LR or LO), Property Type, Brand Name, Monthly Amount of rent, Monthly Service Charge, Total Deposits, Tenant Selection, Building ID
+Note: Total Monthly Amount = Monthly Amount of rent + Monthly Service Charge
+
+**CHECK THESE RULES:**
+
+1. **LR + Big Tenant Rule**: 
+   If contract starts with "LR" AND tenant is big tenant (Property Type is "Hypermarket" OR brand appears to be major/anchor tenant from bigtenant.xlsx context),
+   then Total Deposits MUST be at least 3.00 × (Monthly Amount of rent + Monthly Service Charge)
+   Return: {"field":"Tenancy Deposit","value":"[amount]","valid":true/false,"reason":"LR + Big Tenant (bigtenant.xlsx) = 3 months of total charges required (Rent+Service)"}
+
+2. **LO + Non-Qualified Major Property Rule**:
+   If contract starts with "LO" AND Tenant Selection = "No" AND Property Type is "Hypermarket",
+   then Total Deposits MUST be at least 4.00 × (Monthly Amount of rent + Monthly Service Charge)
+   Return: {"field":"Tenancy Deposit","value":"[amount]","valid":true/false,"reason":"LO + Non-Qualified + Hypermarket = 4 months of total charges required (Rent+Service)"}
+
+3. **Master_9_cell Rule**:
+   If Building ID exists in Master_9_cell.xlsx,
+   then Total Deposits MUST be at least 2.00 × (Monthly Amount of rent + Monthly Service Charge)
+   Return: {"field":"Tenancy Deposit","value":"[amount]","valid":true/false,"reason":"Building in Master_9_cell = 2 months of total charges required (Rent+Service)"}
+
+**If no rules apply, return:**
+[{"field":"Tenancy Deposit","value":"[amount]","valid":null,"reason":"No LO/LR special rules apply, check Part 3"}]
+
+Note: Web data may show deposits combined or separately

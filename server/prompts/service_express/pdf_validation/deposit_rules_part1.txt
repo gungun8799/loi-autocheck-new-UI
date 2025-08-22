@@ -1,0 +1,30 @@
+Validate deposit rules (Part 1/2) and return JSON array of validation results.
+
+Extract: Monthly Amount of rent, Monthly Amount of service, Brand Name, Property Type, Total Deposits
+Note: Total Monthly Amount = Monthly Amount of rent + Monthly Amount of service
+
+"Tenancy Deposit" Rules (Part 1 - Apply in order, stop at first match):
+
+1. **Service Express Low Service Exception**: For Service Express contracts, if Monthly Amount of rent ≤ 5000
+   - If Total Deposits < 1 × (Monthly Amount of rent + Monthly Amount of service): ❌ Invalid "Service Express: Monthly Amount of rent (≤5000) - Total Deposits (<deposit>) is less than required 1 × total monthly charges (=<total>)"
+   - Else if Total Deposits >= 1 × (Monthly Amount of rent + Monthly Amount of service): ✅ Valid "Service Express: Monthly Amount of rent (≤5000) - Total Deposits (<deposit>) is acceptable (≥ 1 × total monthly charges)"
+
+2. **ATM SCB Exception**: If "Brand Name" contains "ATM SCB" (case-insensitive)
+   - If Total Deposits == 0: ✅ Valid "Brand Name contains ATM SCB; Total Deposits may be zero"
+   - Else: ✅ Valid "Brand Name contains ATM SCB; Total Deposits (<deposit>) is acceptable (≥ 0)"
+
+3. **ATM KBANK & Go Fresh Exception**: If "Brand Name" contains "ATM KBANK" AND "Property Type" is "Go Fresh"
+   - If Total Deposits < 1 × (Monthly Amount of rent + Monthly Amount of service): ❌ Invalid "Brand Name contains ATM KBANK and Property Type is Go Fresh; Total Deposits (<deposit>) is less than 1 × total monthly charges (=<total>)"
+   - Else: ✅ Valid "Brand Name contains ATM KBANK and Property Type is Go Fresh; Total Deposits (<deposit>) ≥ 1 × total monthly charges (=<total>)"
+
+**NOTE**: If none of the above rules match, return null result to proceed to Part 2.
+
+Return format:
+[
+  {
+    "field": "Total Deposits",
+    "value": "Extracted value",
+    "valid": true or false or null,
+    "reason": "Explanation with amounts and rules applied, or 'No Part 1 rules matched - proceed to Part 2'"
+  }
+]

@@ -1,0 +1,28 @@
+Validate deposit amounts for PERMANENT FIXED contracts from WEB scraped data. Return JSON array of validation results.
+
+**IMPORTANT**: Only validate these essential deposit fields. Do not validate other fields.
+
+**DEPOSIT VALIDATION:**
+"Rental Deposit" - Must be present as numerical value from web data
+"Service Deposit" - Must be present as numerical value from web data
+
+**WEB-SPECIFIC RULES:**
+- Web data should contain deposit amount information
+- Deposits should be positive numerical values
+- Allow for web formatting differences (currency symbols, commas, etc.)
+
+Return format:
+[
+  {
+    "field": "Rental Deposit",
+    "value": "Web extracted value",
+    "valid": true or false,
+    "reason": "Validation explanation"
+  },
+  {
+    "field": "Service Deposit", 
+    "value": "Web extracted value",
+    "valid": true or false,
+    "reason": "Validation explanation"
+  }
+]

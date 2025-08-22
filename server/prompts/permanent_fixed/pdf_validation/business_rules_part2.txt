@@ -1,0 +1,15 @@
+Validate business rules (Part 2/5) and return JSON array of validation results.
+
+Validation Rules (Part 2 - Net Rent):
+
+"Net Rent (p.m.)" - Valid if numeric and > 0. If null/non-numeric/≤ 0: invalid "Net Rent ('<value>') is not a positive number". Else valid "Net Rent is valid"
+
+Return format:
+[
+  {
+    "field": "Field name", 
+    "value": "Extracted value (or null)",
+    "valid": true or false,
+    "reason": "Explanation"
+  }
+]

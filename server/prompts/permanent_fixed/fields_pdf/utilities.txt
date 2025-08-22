@@ -1,0 +1,18 @@
+Extract utility information for PERMANENT FIXED contracts and return in JSON format.
+
+**PDF EXTRACTION PATTERNS:**
+Extract data from Thai PDF contract documents with OCR text, handling spaced text and document structure.
+
+Required fields:
+"Include Utility" - **CALCULATION LOGIC:** Output "Yes" or "No". For permanent fixed contracts, "Yes" if any of "Utilities charge (water)", "Utilities charge (Electricity)", "Utilities charge (cooking gas)" has non-zero value. **PDF PATTERNS:** Check if any utility rates are > 0.00
+
+"Utilities charge (water)" - **PDF PATTERNS:** Look for "ค่าน้ำ" followed by number and "บาทต่อหน่วย". Extract the numeric value. **WEB PATTERNS:** Check "Meter Type" column and extract number from "Tariff as at Contract Start Date" column. If nothing found, put 0.00
+
+"Utilities charge (Electricity)" - **PDF PATTERNS:** Look for "ค่าไฟฟ้า" followed by number and "บาทต่อหน่วย". Extract the numeric value. **WEB PATTERNS:** Check "Meter Type" column and extract number from "Tariff as at Contract Start Date" column. If nothing found, put 0.00
+
+"Utilities charge (cooking gas)" - **PDF PATTERNS:** Look for "ค่าก๊าซหุงต้ม" followed by number and "บาทต่อหน่วย". Extract the numeric value. **WEB PATTERNS:** Check "Meter Type" column and extract number from "Tariff as at Contract Start Date" column. If nothing found, put 0.00
+
+**IMPORTANT CALCULATION RULES:**
+- Extract all three utility charge values first
+- If any of the three utility charges is non-zero, return "Include Utility" as "Yes"
+- If all three are exactly 0.00 (or missing), return "Include Utility" as "No"

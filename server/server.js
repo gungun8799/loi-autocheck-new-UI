@@ -1,0 +1,7311 @@
+// ===== server.js (Backend) =====
+import express from 'express';
+import multer from 'multer';
+import path from 'path';
+import fs from 'fs';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import admin from 'firebase-admin';
+import { ImageAnnotatorClient } from '@google-cloud/vision';
+// MongoDB imports
+import mongoose from 'mongoose';
+import bcryptjs from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+// Removed Gemini - using Lotus LLM only
+import puppeteer from 'puppeteer';
+import xlsx from 'xlsx';
+import { v4 as uuidv4 } from 'uuid';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+import axios from 'axios';
+import archiver from 'archiver';
+
+// ES module __dirname setup
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// ===== DATABASE CONFIGURATION =====
+// Set database type via environment variable: 'firebase' or 'mongodb'
+const DATABASE_TYPE = process.env.DATABASE_TYPE || 'firebase';
+console.log(`🗄️  Database type: ${DATABASE_TYPE}`);
+
+// MongoDB Schema Definitions
+const userSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  role: { type: String, enum: ['admin', 'user'], default: 'user' },
+  createdAt: { type: Date, default: Date.now },
+  lastLogin: { type: Date },
+  isActive: { type: Boolean, default: true }
+});
+
+const documentSchema = new mongoose.Schema({
+  filename: { type: String, required: true },
+  originalName: { type: String, required: true },
+  filePath: { type: String, required: false, default: '' },
+  fileType: { type: String, required: true, enum: ['pdf', 'image', 'excel'] },
+  mimeType: { type: String, required: true },
+  size: { type: Number, required: true },
+  ocrText: { type: String },
+  extractedData: { type: mongoose.Schema.Types.Mixed },
+  geminiOutput: { type: String },
+  validationResult: { type: mongoose.Schema.Types.Mixed },
+  promptKey: { type: String },
+  contractNumber: { type: String },
+  processedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  status: { type: String, enum: ['uploaded', 'processing', 'completed', 'failed'], default: 'uploaded' },
+  processingLog: [{
+    step: String,
+    status: String,
+    message: String,
+    timestamp: { type: Date, default: Date.now }
+  }]
+}, {
+  timestamps: true
+});
+
+const processingSessionSchema = new mongoose.Schema({
+  sessionId: { type: String, required: true, unique: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  documentsProcessed: { type: Number, default: 0 },
+  documentsSuccess: { type: Number, default: 0 },
+  documentsFailed: { type: Number, default: 0 },
+  startTime: { type: Date, default: Date.now },
+  endTime: { type: Date },
+  status: { type: String, enum: ['active', 'completed', 'failed'], default: 'active' },
+  metadata: { type: mongoose.Schema.Types.Mixed }
+});
+
+// RPA Log Schema for MongoDB
+const rpaLogSchema = new mongoose.Schema({
+  timestamp: { type: Date, default: Date.now, required: true },
+  action: { type: String, required: true, trim: true },
+  user: { type: String, required: true, default: 'System' },
+  contractNumber: { type: String, default: null, trim: true },
+  status: { 
+    type: String, 
+    required: true, 
+    enum: ['Processing', 'Success', 'Error', 'Warning', 'Info', 'Unknown'], 
+    default: 'Unknown' 
+  },
+  actionType: { 
+    type: String, 
+    enum: ['autoprocess', 'forceprocess', 'manual', 'system'], 
+    default: 'system' 
+  },
+  details: { type: mongoose.Schema.Types.Mixed, default: {} },
+  ipAddress: { type: String, default: null },
+  userAgent: { type: String, default: null }
+}, {
+  timestamps: true
+});
+
+// Indexes for RPA logs
+rpaLogSchema.index({ timestamp: -1 });
+rpaLogSchema.index({ action: 1 });
+rpaLogSchema.index({ contractNumber: 1 });
+rpaLogSchema.index({ actionType: 1 });
+
+// MongoDB Models
+let User, Document, ProcessingSession, RPALog;
+if (DATABASE_TYPE === 'mongodb') {
+  User = mongoose.model('User', userSchema);
+  Document = mongoose.model('Document', documentSchema);
+  ProcessingSession = mongoose.model('ProcessingSession', processingSessionSchema);
+  RPALog = mongoose.model('RPALog', rpaLogSchema);
+}
+
+// at the top of your file
+// either of these:
+const fsPromises = fs.promises;      // define fsPromises
+// …or just use fs.promises inline below
+
+// ===== JWT AUTHENTICATION MIDDLEWARE (for MongoDB) =====
+const authenticateToken = (req, res, next) => {
+  if (DATABASE_TYPE === 'firebase') {
+    // Skip auth for Firebase mode
+    return next();
+  }
+  
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ error: 'Access token required' });
+  }
+
+  jwt.verify(token, process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this-in-production', (err, user) => {
+    if (err) {
+      return res.status(403).json({ error: 'Invalid or expired token' });
+    }
+    req.user = user;
+    next();
+  });
+};
+
+const optionalAuth = (req, res, next) => {
+  if (DATABASE_TYPE === 'firebase') {
+    return next();
+  }
+  
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (token) {
+    jwt.verify(token, process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this-in-production', (err, user) => {
+      if (!err) {
+        req.user = user;
+      }
+    });
+  }
+  next();
+};
+
+// ===== UTILITY FUNCTION TO STRIP THINK TAGS =====
+function stripThinkTags(response) {
+  if (!response || typeof response !== 'string') {
+    return response;
+  }
+  
+  console.log('[DEBUG stripThinkTags] Input length:', response.length);
+  console.log('[DEBUG stripThinkTags] First 200 chars:', response.substring(0, 200));
+  console.log('[DEBUG stripThinkTags] Last 200 chars:', response.substring(response.length - 200));
+  
+  // First, remove properly closed <think>...</think> tags
+  let cleaned = response.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  
+  // Handle unclosed think tags more intelligently
+  if (cleaned.includes('<think>')) {
+    console.log('[DEBUG stripThinkTags] Found unclosed think tag');
+    
+    // Try multiple strategies to extract JSON from content with unclosed think tags
+    let bestResult = null;
+    
+    // Strategy 1: Try to extract JSON from the full text (ignoring think tags)
+    const jsonFromFull = extractValidJson(cleaned);
+    if (jsonFromFull) {
+      console.log('[DEBUG stripThinkTags] Found JSON in full text despite think tags');
+      bestResult = jsonFromFull;
+    } else {
+      // Strategy 2: Remove the unclosed think tag and everything inside it
+      const thinkPos = cleaned.indexOf('<think>');
+      if (thinkPos !== -1) {
+        const beforeThink = cleaned.substring(0, thinkPos);
+        const afterThinkContent = cleaned.substring(thinkPos);
+        
+        // Find where the actual content resumes after the think tag
+        // Look for common JSON start patterns after <think>
+        const jsonStartPatterns = [/\[/, /\{/, /```json\s*\[/, /```json\s*\{/];
+        let afterThinkStart = -1;
+        
+        for (const pattern of jsonStartPatterns) {
+          const match = afterThinkContent.search(pattern);
+          if (match !== -1) {
+            afterThinkStart = thinkPos + match;
+            break;
+          }
+        }
+        
+        if (afterThinkStart !== -1) {
+          // Found potential JSON after the think tag
+          const afterThink = cleaned.substring(afterThinkStart);
+          const jsonFromAfter = extractValidJson(afterThink);
+          if (jsonFromAfter) {
+            console.log('[DEBUG stripThinkTags] Found JSON after unclosed think tag');
+            bestResult = beforeThink + jsonFromAfter;
+          }
+        }
+        
+        // Strategy 3: Try to find JSON before the think tag
+        if (!bestResult) {
+          const jsonFromBefore = extractValidJson(beforeThink);
+          if (jsonFromBefore) {
+            console.log('[DEBUG stripThinkTags] Found JSON before unclosed think tag');
+            bestResult = jsonFromBefore;
+          }
+        }
+        
+        // Strategy 4: If all else fails, try to preserve as much content as possible
+        if (!bestResult) {
+          // Don't just remove everything after <think> - try to preserve non-think content
+          const contentWithoutThinkTag = cleaned.replace(/<think>/g, '').trim();
+          if (contentWithoutThinkTag.length > 10) { // Only if we have substantial content
+            console.log('[DEBUG stripThinkTags] Preserving content after removing think tag');
+            bestResult = contentWithoutThinkTag;
+          } else {
+            console.log('[DEBUG stripThinkTags] Last resort: removing everything from <think> onwards');
+            bestResult = beforeThink.trim();
+          }
+        }
+      }
+    }
+    
+    cleaned = bestResult || cleaned;
+  }
+  
+  // Try to extract valid JSON using bracket/brace counting from the entire cleaned text
+  const extractedJson = extractValidJson(cleaned);
+  if (extractedJson) {
+    console.log('[DEBUG stripThinkTags] Successfully extracted JSON using bracket counting');
+    cleaned = extractedJson;
+  } else {
+    // If no JSON found, try to remove common prefixes and suffixes
+    console.log('[DEBUG stripThinkTags] No JSON found, trying cleanup patterns');
+    
+    // Remove markdown code fences
+    cleaned = cleaned.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/g, '');
+    
+    // Remove common prefixes
+    cleaned = cleaned.replace(/^Here's?\s+the\s+.*?:\s*/i, '');
+    cleaned = cleaned.replace(/^Based\s+on\s+.*?:\s*/i, '');
+    cleaned = cleaned.replace(/^The\s+.*?is\s*:\s*/i, '');
+    
+    // Remove explanatory text patterns
+    cleaned = cleaned.replace(/\[i\.e\.,.*?\]/gi, '');
+    cleaned = cleaned.replace(/Alternatively,.*?$/gm, '');
+    
+    // Try one more time to extract JSON after cleanup
+    const finalJson = extractValidJson(cleaned);
+    if (finalJson) {
+      console.log('[DEBUG stripThinkTags] Found JSON after cleanup');
+      cleaned = finalJson;
+    }
+  }
+  
+  const result = cleaned.trim();
+  console.log('[DEBUG stripThinkTags] Output length:', result.length);
+  console.log('[DEBUG stripThinkTags] Output preview:', result.substring(0, 200));
+  
+  return result;
+}
+
+function extractValidJson(text) {
+  if (!text || typeof text !== 'string') {
+    return null;
+  }
+  
+  // First, try simple regex patterns for common JSON structures
+  const jsonPatterns = [
+    // Match array of objects with field/match properties
+    /\[\s*\{[^}]*"field"[^}]*\}[\s\S]*?\]/g,
+    // Match array of objects with any structure
+    /\[\s*\{[\s\S]*?\}\s*\]/g,
+    // Match simple arrays
+    /\[[^\]]*\]/g,
+    // Match objects
+    /\{[^{}]*\}/g
+  ];
+  
+  for (const pattern of jsonPatterns) {
+    const matches = text.match(pattern);
+    if (matches) {
+      for (const match of matches) {
+        try {
+          const parsed = JSON.parse(match);
+          // Accept any valid JSON structure
+          if (parsed !== null && parsed !== undefined) {
+            console.log(`[DEBUG extractValidJson] Found valid JSON with regex pattern, length: ${match.length}`);
+            return match;
+          }
+        } catch (e) {
+          // Continue to next match
+        }
+      }
+    }
+  }
+  
+  // Look for potential JSON start positions - arrays or objects
+  const potentialStarts = [];
+  
+  // Find all potential array starts
+  let pos = 0;
+  while ((pos = text.indexOf('[', pos)) !== -1) {
+    potentialStarts.push({ pos, type: 'array' });
+    pos++;
+  }
+  
+  // Find all potential object starts
+  pos = 0;
+  while ((pos = text.indexOf('{', pos)) !== -1) {
+    potentialStarts.push({ pos, type: 'object' });
+    pos++;
+  }
+  
+  // Sort by position
+  potentialStarts.sort((a, b) => a.pos - b.pos);
+  
+  // Try each potential start position
+  for (const start of potentialStarts) {
+    console.log(`[DEBUG extractValidJson] Trying ${start.type} at position ${start.pos}`);
+    
+    const jsonStr = tryExtractJsonFromPosition(text, start.pos, start.type === 'array');
+    if (jsonStr) {
+      console.log(`[DEBUG extractValidJson] Successfully extracted JSON from position ${start.pos}`);
+      return jsonStr;
+    }
+  }
+  
+  console.log('[DEBUG extractValidJson] No valid JSON found');
+  return null;
+}
+
+function tryExtractJsonFromPosition(text, startPos, isArray) {
+  const openChar = isArray ? '[' : '{';
+  const closeChar = isArray ? ']' : '}';
+  let depth = 0;
+  let inString = false;
+  let escapeNext = false;
+  
+  for (let i = startPos; i < text.length; i++) {
+    const char = text[i];
+    
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    
+    if (char === '\\') {
+      escapeNext = true;
+      continue;
+    }
+    
+    if (char === '"' && !escapeNext) {
+      inString = !inString;
+      continue;
+    }
+    
+    if (!inString) {
+      if (char === openChar) {
+        depth++;
+      } else if (char === closeChar) {
+        depth--;
+        if (depth === 0) {
+          // Found complete JSON candidate
+          const jsonStr = text.substring(startPos, i + 1);
+          console.log(`[DEBUG tryExtractJsonFromPosition] Found complete structure, length: ${jsonStr.length}`);
+          
+          // Validate it's actually valid JSON
+          try {
+            const parsed = JSON.parse(jsonStr);
+            
+            // Accept any valid JSON structure - arrays or objects
+            if (isArray && Array.isArray(parsed)) {
+              console.log(`[DEBUG tryExtractJsonFromPosition] Valid array found with ${parsed.length} elements`);
+              return jsonStr;
+            }
+            
+            if (!isArray && typeof parsed === 'object' && parsed !== null) {
+              console.log('[DEBUG tryExtractJsonFromPosition] Valid object found');
+              return jsonStr;
+            }
+            
+            // Also accept primitive values in some cases
+            if (typeof parsed === 'string' || typeof parsed === 'number' || typeof parsed === 'boolean') {
+              console.log(`[DEBUG tryExtractJsonFromPosition] Valid primitive value found: ${typeof parsed}`);
+              return jsonStr;
+            }
+            
+            console.log('[DEBUG tryExtractJsonFromPosition] Unexpected JSON structure type:', typeof parsed);
+          } catch (e) {
+            console.log('[DEBUG tryExtractJsonFromPosition] JSON validation failed:', e.message);
+          }
+          
+          return null; // This position didn't work, but don't continue counting
+        }
+      }
+    }
+  }
+  
+  return null; // Incomplete structure
+}
+
+// ===== ENHANCED ROBUST JSON PARSING FUNCTION =====
+function parseJsonRobustly(input, category) {
+  if (!input || typeof input !== 'string') {
+    console.warn(`[🔧 ${category}] Input is not a valid string - type: ${typeof input}, value:`, input);
+    return null;
+  }
+
+  let cleanedResult = input.trim();
+  console.log(`[🔧 ${category}] Starting robust parsing, length: ${cleanedResult.length}`);
+
+  // Strategy 1: Remove markdown code blocks
+  if (cleanedResult.includes('```json') || cleanedResult.includes('```')) {
+    cleanedResult = cleanedResult.replace(/```json\s*/gi, '').replace(/```/g, '');
+    console.log(`[🔧 ${category}] Removed code blocks`);
+  }
+
+  // Strategy 2: Handle duplicate arrays
+  if (cleanedResult.includes('][')) {
+    console.log(`[🔧 ${category}] Found duplicate arrays, taking first valid array`);
+    const firstArrayEnd = cleanedResult.indexOf('][');
+    cleanedResult = cleanedResult.substring(0, firstArrayEnd + 1);
+  }
+
+  // Strategy 3: Find and extract the JSON array/object with proper bracket counting
+  const firstBracket = cleanedResult.indexOf('[');
+  const firstBrace = cleanedResult.indexOf('{');
+  
+  // Determine if we're looking for array or object
+  let startPos = -1;
+  let isArray = false;
+  
+  if (firstBracket !== -1 && (firstBrace === -1 || firstBracket < firstBrace)) {
+    startPos = firstBracket;
+    isArray = true;
+  } else if (firstBrace !== -1) {
+    startPos = firstBrace;
+    isArray = false;
+  }
+
+  if (startPos !== -1) {
+    // Use bracket/brace counting to find the end
+    let depth = 0;
+    let inString = false;
+    let escapeNext = false;
+    const openChar = isArray ? '[' : '{';
+    const closeChar = isArray ? ']' : '}';
+    
+    for (let i = startPos; i < cleanedResult.length; i++) {
+      const char = cleanedResult[i];
+      
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      
+      if (char === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      
+      if (char === '"' && !escapeNext) {
+        inString = !inString;
+        continue;
+      }
+      
+      if (!inString) {
+        if (char === openChar) depth++;
+        else if (char === closeChar) {
+          depth--;
+          if (depth === 0) {
+            // Found complete JSON
+            const jsonCandidate = cleanedResult.substring(startPos, i + 1);
+            console.log(`[🔧 ${category}] Extracted JSON candidate, length: ${jsonCandidate.length}`);
+            
+            try {
+              const parsed = JSON.parse(jsonCandidate);
+              if (Array.isArray(parsed) || (typeof parsed === 'object' && parsed !== null)) {
+                console.log(`[✅ ${category}] Successfully parsed robust JSON`);
+                return parsed;
+              }
+            } catch (parseErr) {
+              console.warn(`[⚠️ ${category}] JSON candidate failed to parse:`, parseErr.message);
+            }
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  // Strategy 4: Try extractValidJson as fallback
+  const extractedJson = extractValidJson(cleanedResult);
+  if (extractedJson) {
+    try {
+      const parsed = JSON.parse(extractedJson);
+      console.log(`[✅ ${category}] Fallback extractValidJson worked`);
+      return parsed;
+    } catch (e) {
+      console.warn(`[⚠️ ${category}] extractValidJson result failed to parse:`, e.message);
+    }
+  }
+
+  // Strategy 5: Handle truncated JSON by finding last complete object
+  console.log(`[🩹 ${category}] Attempting to fix truncated JSON`);
+  try {
+    let lastCompleteEnd = -1;
+    let braceCount = 0;
+    let inString = false;
+    let escapeNext = false;
+    
+    for (let i = 0; i < cleanedResult.length; i++) {
+      const char = cleanedResult[i];
+      
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      
+      if (char === '\\' && inString) {
+        escapeNext = true;
+        continue;
+      }
+      
+      if (char === '"' && !escapeNext) {
+        inString = !inString;
+        continue;
+      }
+      
+      if (!inString) {
+        if (char === '{') braceCount++;
+        else if (char === '}') {
+          braceCount--;
+          if (braceCount === 0) {
+            lastCompleteEnd = i;
+          }
+        }
+      }
+    }
+    
+    if (lastCompleteEnd > 0) {
+      const fixedJson = cleanedResult.substring(0, lastCompleteEnd + 1) + '\n]';
+      const parsed = JSON.parse(fixedJson);
+      if (Array.isArray(parsed)) {
+        console.log(`[✅ ${category}] Successfully fixed truncated JSON - ${parsed.length} fields`);
+        return parsed;
+      }
+    }
+  } catch (truncErr) {
+    console.warn(`[❌ ${category}] Failed to fix truncated JSON:`, truncErr.message);
+  }
+
+  // Strategy 6: Try to extract any valid array from the text using regex
+  console.log(`[🔧 ${category}] Attempting regex-based JSON extraction as last resort`);
+  try {
+    // Look for the largest valid JSON array in the text
+    const arrayMatches = cleanedResult.match(/\[[\s\S]*?\]/g);
+    if (arrayMatches) {
+      // Try to parse each match, starting with the largest
+      const sortedMatches = arrayMatches.sort((a, b) => b.length - a.length);
+      for (const match of sortedMatches) {
+        try {
+          const parsed = JSON.parse(match);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            console.log(`[✅ ${category}] Regex extraction successful - ${parsed.length} items`);
+            return parsed;
+          }
+        } catch (regexParseErr) {
+          // Try next match
+          continue;
+        }
+      }
+    }
+  } catch (regexErr) {
+    console.warn(`[❌ ${category}] Regex extraction failed:`, regexErr.message);
+  }
+
+  console.warn(`[❌ ${category}] All robust parsing strategies failed`);
+  return null;
+}
+
+
+const FOLDER_PATH = path.join(__dirname, 'contracts');
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const folder = req.query.path; // e.g. ?path=contracts
+    if (!['contracts','processed'].includes(folder)) {
+      return cb(new Error('Invalid upload path'), null);
+    }
+    const dest = path.join(__dirname, folder);
+    cb(null, dest);
+  },
+  filename: (req, file, cb) => {
+    // preserve original filename–or customize as you like
+    cb(null, file.originalname);
+  }
+});
+const upload_2 = multer({ storage });
+
+
+
+// (__dirname already defined above)
+// ✅ Store Puppeteer sessions for different systems
+const browserSessions = new Map();
+// Env and Express setup
+dotenv.config();
+
+// ===== ROBUST RETRY UTILITY FOR PUPPETEER NAVIGATION =====
+async function retryWithBackoff(operation, maxRetries = 5, baseDelay = 2000, operationName = 'operation') {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`[RETRY] ${operationName} - Attempt ${attempt}/${maxRetries}`);
+      const result = await operation();
+      console.log(`[RETRY] ✅ ${operationName} succeeded on attempt ${attempt}`);
+      return result;
+    } catch (error) {
+      console.log(`[RETRY] ❌ ${operationName} failed on attempt ${attempt}: ${error.message}`);
+      
+      if (attempt === maxRetries) {
+        console.log(`[RETRY] 🚫 ${operationName} failed after ${maxRetries} attempts. Giving up.`);
+        throw new Error(`${operationName} failed after ${maxRetries} attempts: ${error.message}`);
+      }
+      
+      // Exponential backoff with jitter
+      const delay = baseDelay * Math.pow(2, attempt - 1) + Math.random() * 1000;
+      console.log(`[RETRY] ⏳ Waiting ${Math.round(delay)}ms before retry...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+}
+
+// ===== ROBUST NAVIGATION FUNCTIONS =====
+async function robustClickSubmenu(page, submenuText, contractNumber) {
+  return await retryWithBackoff(async () => {
+    // Hover over Lease menu first
+    await page.evaluate(() => {
+      const leaseMenu = [...document.querySelectorAll('a')].find(el => el.textContent.trim() === 'Lease');
+      if (leaseMenu) leaseMenu.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    });
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Try to click the submenu
+    const clicked = await page.evaluate((menuText) => {
+      const links = [...document.querySelectorAll('a')];
+      const target = links.find(el => el.textContent.trim() === menuText);
+      if (target) {
+        target.click();
+        return true;
+      }
+      return false;
+    }, submenuText);
+    
+    if (!clicked) {
+      throw new Error(`Could not find or click ${submenuText} submenu`);
+    }
+    
+    return true;
+  }, 8, 3000, `Clicking ${submenuText} submenu`);
+}
+
+async function robustWaitForElement(page, selector, timeout = 30000) {
+  return await retryWithBackoff(async () => {
+    const element = await page.waitForSelector(selector, { timeout: timeout });
+    if (!element) {
+      throw new Error(`Element ${selector} not found`);
+    }
+    return element;
+  }, 5, 2000, `Waiting for element ${selector}`);
+}
+
+async function robustClickMeterSubmenu(page) {
+  return await retryWithBackoff(async () => {
+    const clicked = await page.evaluate(() => {
+      const menu = document.querySelector('#menu_MenuLiteralDiv > ul > li:nth-child(25) ul');
+      if (!menu) return false;
+      const a = Array.from(menu.querySelectorAll('a'))
+        .find(x => x.textContent.trim() === 'Meter');
+      if (a) { a.click(); return true; }
+      return false;
+    });
+    
+    if (!clicked) {
+      throw new Error('Could not find or click Meter submenu');
+    }
+    
+    return true;
+  }, 6, 2500, 'Clicking Meter submenu');
+}
+
+// Lotus LLM Configuration
+const LOTUS_LLM_URL = 'https://api-cpxis.lotuss.com/llm/v1/chat/completions';
+const LOTUS_API_KEY = 'accounting.lotuss.F51DAF28FD6422DDF3CD864F833CC';
+const app = express();
+const upload = multer({ dest: 'uploads/' });
+app.use(cors());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(
+  '/prompts',
+  express.static(path.join(__dirname, 'prompts'))
+);
+
+// ===== AUTHENTICATION ROUTES (MongoDB mode only) =====
+if (DATABASE_TYPE === 'mongodb') {
+  // User Registration
+  app.post('/api/auth/register', async (req, res) => {
+    try {
+      const { username, email, password, role = 'user' } = req.body;
+
+      // Check if user already exists
+      const existingUser = await User.findOne({ 
+        $or: [{ email }, { username }] 
+      });
+      
+      if (existingUser) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'User already exists with this email or username' 
+        });
+      }
+
+      // Hash password
+      const saltRounds = 10;
+      const hashedPassword = await bcryptjs.hash(password, saltRounds);
+
+      // Create new user
+      const newUser = new User({
+        username,
+        email,
+        password: hashedPassword,
+        role
+      });
+
+      await newUser.save();
+      
+      res.status(201).json({ 
+        success: true, 
+        message: 'User registered successfully',
+        user: {
+          id: newUser._id,
+          username: newUser.username,
+          email: newUser.email,
+          role: newUser.role
+        }
+      });
+    } catch (error) {
+      console.error('Registration error:', error);
+      res.status(500).json({ 
+        success: false, 
+        message: 'Server error during registration' 
+      });
+    }
+  });
+
+  // User Login
+  app.post('/api/auth/login', async (req, res) => {
+    try {
+      const { username, password } = req.body;
+
+      // Find user
+      const user = await User.findOne({ 
+        $or: [{ email: username }, { username }] 
+      });
+      
+      if (!user) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Invalid credentials' 
+        });
+      }
+
+      // Verify password
+      const isPasswordValid = await bcryptjs.compare(password, user.password);
+      
+      if (!isPasswordValid) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Invalid credentials' 
+        });
+      }
+
+      // Update last login
+      user.lastLogin = new Date();
+      await user.save();
+
+      // Generate JWT token
+      const token = jwt.sign(
+        { 
+          userId: user._id, 
+          username: user.username, 
+          role: user.role 
+        },
+        process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this-in-production',
+        { expiresIn: '24h' }
+      );
+
+      res.json({ 
+        success: true, 
+        message: 'Login successful',
+        token,
+        user: {
+          id: user._id,
+          username: user.username,
+          email: user.email,
+          role: user.role,
+          lastLogin: user.lastLogin
+        }
+      });
+    } catch (error) {
+      console.error('Login error:', error);
+      res.status(500).json({ 
+        success: false, 
+        message: 'Server error during login' 
+      });
+    }
+  });
+
+  // Get User Profile
+  app.get('/api/auth/profile', authenticateToken, async (req, res) => {
+    try {
+      const user = await User.findById(req.user.userId).select('-password');
+      if (!user) {
+        return res.status(404).json({ 
+          success: false, 
+          message: 'User not found' 
+        });
+      }
+      
+      res.json({ 
+        success: true, 
+        user 
+      });
+    } catch (error) {
+      console.error('Profile fetch error:', error);
+      res.status(500).json({ 
+        success: false, 
+        message: 'Server error' 
+      });
+    }
+  });
+
+  console.log('✅ MongoDB authentication routes loaded');
+}
+
+// Add this route for checking file metadata and saving to Firebase
+app.post('/api/process-pdf-folder', async (req, res) => {
+  const folderPath = path.join(__dirname, 'contracts');  // Replace with your folder path
+  const files = fs.readdirSync(folderPath).filter(f => f.toLowerCase().endsWith('.pdf'));
+
+  const fileData = [];
+
+  for (const file of files) {
+    // ── IMMEDIATELY skip any filename that isn’t digits + "_" + (LO|LR) + digits + "_" + digits ──
+    const baseName = file.replace(/\.pdf$/i, '');
+    const validPattern = /^\d+_(?:LO|LR)\d+_\d+$/;
+    if (!validPattern.test(baseName)) {
+      console.log(`[⏭️  Skipping invalid filename on server] ${file}`);
+      continue;
+    }
+    
+    const filePath = path.join(folderPath, file);
+    
+    // Get last modified timestamp of the file
+    const stats = fs.statSync(filePath);
+    const lastModifiedTime = stats.mtime;  // Last modified time
+
+    // Assuming contract_number is the name of the file without extension
+    const contractNumber = path.basename(file, '.pdf');
+
+    // Save to Firebase (file_check collection)
+    await db.collection('file_check').doc(contractNumber).set({
+      contract_number: contractNumber,
+      last_modified_time: lastModifiedTime,
+      contract_status: 'pending',  // Initially set as 'pending'
+    });
+
+    fileData.push({
+      contract_number: contractNumber,
+      last_modified_time,
+      contract_status: 'pending',
+    });
+  }
+
+  console.log('[File Check] Processed file data:', fileData);
+
+  res.json({ success: true, files: fileData });
+});
+
+app.post('/api/fetch-next-pdf-to-process', async (req, res) => {
+  try {
+    // Fetch files ordered by last_modified_time (ascending)
+    const snapshot = await db.collection('file_check')
+      .where('contract_status', '==', 'pending')  // Only get pending files
+      .orderBy('last_modified_time', 'asc')  // Order by the last modified time
+      .limit(1)  // Get the oldest file that hasn't been processed yet
+      .get();
+
+    if (snapshot.empty) {
+      return res.status(200).json({ success: true, message: 'No files to process' });
+    }
+
+    const fileDoc = snapshot.docs[0];
+    const fileData = fileDoc.data();
+
+    // Update the status to 'in-progress'
+    await fileDoc.ref.update({
+      contract_status: 'in-progress',
+    });
+
+    console.log('[File Check] Next file to process:', fileData.contract_number);
+
+    res.json({ success: true, fileData });
+  } catch (err) {
+    console.error('[File Check Error]', err);
+    res.status(500).json({ success: false, message: 'Error fetching next file to process', error: err.message });
+  }
+});
+
+app.post('/api/process-pdf', async (req, res) => {
+  const { contractNumber, filePath } = req.body;
+
+  try {
+    // Open Puppeteer and navigate to the extraction page
+    const browser = await puppeteer.launch({ 
+      headless: false,
+      protocolTimeout: 300000 // 5 minutes timeout
+    });
+    const page = await browser.newPage();
+    page.setDefaultTimeout(0); // Disable all timeouts
+    page.setDefaultNavigationTimeout(0); // Disable navigation timeouts
+
+    // Navigate to the page containing the file extraction feature
+    await page.goto('http://localhost:5001/extract-pdf'); // Adjust URL as needed
+
+    // Simulate dragging the file into the file upload input area
+    const inputElement = await page.$('input[type="file"]');
+    await inputElement.uploadFile(filePath);  // Use the actual file path
+
+    // Click the "Extract" button to start the extraction
+    const extractButton = await page.$('button#extract');  // Adjust the selector as needed
+    await extractButton.click();
+
+    // Wait for the extraction to finish (you can set a timeout or wait for specific UI changes)
+    await page.waitForSelector('#extraction-status', { visible: true });  // Adjust based on your UI
+
+    console.log('[PDF Extract] Extraction finished for contract:', contractNumber);
+
+    // Update the contract status in Firebase
+    const fileDocRef = db.collection('file_check').doc(contractNumber);
+    await fileDocRef.update({
+      contract_status: 'completed',  // Set status to 'completed' after extraction
+    });
+
+    res.json({ success: true, message: `File processed: ${contractNumber}` });
+
+    await browser.close();
+  } catch (err) {
+    console.error('[PDF Process Error]', err);
+    res.status(500).json({ success: false, message: 'Error processing PDF', error: err.message });
+  }
+});
+
+
+// ===== DATABASE ABSTRACTION LAYER =====
+class DatabaseAdapter {
+  constructor(type) {
+    this.type = type;
+    this.db = null;
+    this.bucket = null;
+  }
+
+  async initialize() {
+    if (this.type === 'firebase') {
+      // Firebase Admin Init
+      const serviceAccount = JSON.parse(
+        fs.readFileSync(path.join(__dirname, './loi-checker-firebase-adminsdk-fbsvc-5b4567b1a4.json'), 'utf8')
+      );
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+        storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
+      });
+      this.db = admin.firestore();
+      this.bucket = admin.storage().bucket();
+      console.log('✅ Firebase initialized successfully');
+    } else if (this.type === 'mongodb') {
+      // MongoDB initialization
+      const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/vision-app';
+      try {
+        await mongoose.connect(MONGODB_URI);
+        console.log('✅ MongoDB connected successfully');
+        
+        // Create default admin user if it doesn't exist
+        await this.createDefaultAdmin();
+      } catch (error) {
+        console.error('❌ MongoDB connection failed:', error);
+        throw error;
+      }
+    }
+  }
+
+  async createDefaultAdmin() {
+    if (this.type !== 'mongodb') return;
+    
+    try {
+      const existingAdmin = await User.findOne({ username: 'admin' });
+      if (!existingAdmin) {
+        const hashedPassword = await bcryptjs.hash('admin123', 10);
+        const adminUser = new User({
+          username: 'admin',
+          email: 'admin@example.com',
+          password: hashedPassword,
+          role: 'admin'
+        });
+        await adminUser.save();
+        console.log('✅ Default admin user created: admin/admin123');
+      }
+    } catch (error) {
+      console.error('❌ Error creating default admin:', error);
+    }
+  }
+
+  // Database operation adapters
+  async saveFileCheck(contractNumber, data) {
+    if (this.type === 'firebase') {
+      return await this.db.collection('file_check').doc(contractNumber).set(data);
+    } else if (this.type === 'mongodb') {
+      const doc = new Document({
+        filename: contractNumber,
+        originalName: data.file_name || contractNumber,
+        filePath: data.file_path || '',
+        size: data.file_size || 0,
+        fileType: 'pdf',
+        mimeType: 'application/pdf',
+        status: 'uploaded',
+        extractedData: data
+      });
+      return await doc.save();
+    }
+  }
+
+  async getFileCheck(contractNumber) {
+    if (this.type === 'firebase') {
+      const doc = await this.db.collection('file_check').doc(contractNumber).get();
+      return doc.exists ? { data: () => doc.data(), ref: doc.ref } : null;
+    } else if (this.type === 'mongodb') {
+      const doc = await Document.findOne({ filename: contractNumber });
+      return doc ? {
+        data: () => ({
+          contract_number: doc.filename,
+          file_name: doc.originalName,
+          file_path: doc.filePath,
+          created_at: doc.createdAt,
+          updated_at: doc.updatedAt,
+          contract_status: doc.status,
+          ...doc.extractedData
+        }),
+        ref: {
+          update: async (updates) => {
+            Object.assign(doc, updates);
+            doc.updatedAt = new Date();
+            return await doc.save();
+          }
+        }
+      } : null;
+    }
+  }
+
+  async queryFileCheck(filters) {
+    if (this.type === 'firebase') {
+      let query = this.db.collection('file_check');
+      
+      if (filters.where) {
+        filters.where.forEach(([field, operator, value]) => {
+          query = query.where(field, operator, value);
+        });
+      }
+      
+      if (filters.orderBy) {
+        query = query.orderBy(filters.orderBy[0], filters.orderBy[1]);
+      }
+      
+      if (filters.limit) {
+        query = query.limit(filters.limit);
+      }
+      
+      const snapshot = await query.get();
+      return {
+        empty: snapshot.empty,
+        docs: snapshot.docs
+      };
+    } else if (this.type === 'mongodb') {
+      let mongoQuery = {};
+      let sortQuery = {};
+      let limitValue = 0;
+      
+      if (filters.where) {
+        filters.where.forEach(([field, operator, value]) => {
+          const mongoField = field === 'contract_status' ? 'status' : field;
+          if (operator === '==') mongoQuery[mongoField] = value;
+          else if (operator === '!=') mongoQuery[mongoField] = { $ne: value };
+          else if (operator === '<') mongoQuery[mongoField] = { $lt: value };
+          else if (operator === '<=') mongoQuery[mongoField] = { $lte: value };
+          else if (operator === '>') mongoQuery[mongoField] = { $gt: value };
+          else if (operator === '>=') mongoQuery[mongoField] = { $gte: value };
+        });
+      }
+      
+      if (filters.orderBy) {
+        const sortField = filters.orderBy[0] === 'updated_at' ? 'updatedAt' : filters.orderBy[0];
+        sortQuery[sortField] = filters.orderBy[1] === 'desc' ? -1 : 1;
+      }
+      
+      if (filters.limit) {
+        limitValue = filters.limit;
+      }
+      
+      const docs = await Document.find(mongoQuery)
+        .sort(sortQuery)
+        .limit(limitValue);
+        
+      return {
+        empty: docs.length === 0,
+        docs: docs.map(doc => ({
+          data: () => ({
+            contract_number: doc.filename,
+            file_name: doc.originalName,
+            file_path: doc.filePath,
+            created_at: doc.createdAt,
+            updated_at: doc.updatedAt,
+            contract_status: doc.status,
+            ...doc.extractedData
+          }),
+          ref: {
+            update: async (updates) => {
+              Object.assign(doc, updates);
+              doc.updatedAt = new Date();
+              return await doc.save();
+            }
+          }
+        }))
+      };
+    }
+  }
+
+  async saveVisionResults(docId, data, filePath = null) {
+    if (this.type === 'firebase') {
+      return await this.db.collection('vision_results').doc(docId).set(data);
+    } else if (this.type === 'mongodb') {
+      let doc = await Document.findOne({ filename: docId });
+      if (!doc) {
+        doc = new Document({
+          filename: docId,
+          originalName: docId,
+          filePath: filePath || `processed/${docId}.pdf`,
+          size: 0,
+          fileType: 'pdf',
+          mimeType: 'application/pdf',
+          status: 'processing'
+        });
+      }
+      doc.ocrText = data.ocr_text || doc.ocrText;
+      doc.extractedData = { ...doc.extractedData, ...data };
+      return await doc.save();
+    }
+  }
+
+  async saveWebScrapeResults(contractId, data) {
+    if (this.type === 'firebase') {
+      return await this.db.collection('web_scrape_results').doc(contractId).set(data, { merge: true });
+    } else if (this.type === 'mongodb') {
+      let doc = await Document.findOne({ filename: contractId });
+      if (!doc) {
+        doc = new Document({
+          filename: contractId,
+          originalName: contractId,
+          filePath: `contracts/${contractId}.pdf`,
+          size: 0,
+          fileType: 'pdf',
+          mimeType: 'application/pdf',
+          status: 'processing'
+        });
+      }
+      doc.extractedData = { ...doc.extractedData, ...data };
+      return await doc.save();
+    }
+  }
+}
+
+// Initialize database adapter and compatibility layer (will be called at startup)
+let dbAdapter, db, bucket;
+
+async function initializeDatabase() {
+  dbAdapter = new DatabaseAdapter(DATABASE_TYPE);
+  
+  // For backward compatibility, expose db and bucket
+  if (DATABASE_TYPE === 'firebase') {
+    await dbAdapter.initialize();
+    db = dbAdapter.db;
+    bucket = dbAdapter.bucket;
+  } else {
+    await dbAdapter.initialize();
+    // Create mock Firebase-like interface for MongoDB
+    db = {
+      collection: (name) => {
+        const createQuery = (filters = {}) => ({
+          where: (field, operator, value) => {
+            const newFilters = { ...filters };
+            if (!newFilters.where) newFilters.where = [];
+            newFilters.where.push([field, operator, value]);
+            return createQuery(newFilters);
+          },
+          orderBy: (orderField, direction = 'asc') => {
+            const newFilters = { ...filters };
+            newFilters.orderBy = [orderField, direction];
+            return createQuery(newFilters);
+          },
+          limit: (limitValue) => {
+            const newFilters = { ...filters };
+            newFilters.limit = limitValue;
+            return createQuery(newFilters);
+          },
+          get: async () => {
+            // Handle different collection types
+            if (name === 'compare_result' || name === 'web_scrape_results' || name === 'vision_results') {
+              // For these collections, return empty result as they don't exist in MongoDB mode
+              return {
+                empty: true,
+                docs: [],
+                size: 0
+              };
+            }
+            return await dbAdapter.queryFileCheck(filters);
+          }
+        });
+        
+        return {
+          doc: (id) => ({
+            set: async (data, options = {}) => {
+              if (name === 'compare_result' || name === 'web_scrape_results') {
+                return await dbAdapter.saveWebScrapeResults(id, data);
+              } else if (name === 'vision_results') {
+                return await dbAdapter.saveVisionResults(id, data);
+              } else {
+                return await dbAdapter.saveFileCheck(id, data);
+              }
+            },
+            get: async () => {
+              const doc = await dbAdapter.getFileCheck(id);
+              return {
+                exists: !!doc,
+                data: doc ? doc.data : () => null,
+                ref: doc ? doc.ref : null
+              };
+            },
+            update: async (data) => {
+              const doc = await dbAdapter.getFileCheck(id);
+              if (doc && doc.ref && doc.ref.update) {
+                return await doc.ref.update(data);
+              }
+              throw new Error('Document not found or cannot be updated');
+            }
+          }),
+          // Handle direct collection methods
+          ...createQuery()
+        };
+      }
+    };
+    bucket = null; // MongoDB doesn't use Firebase storage
+  }
+  
+  console.log(`✅ Database (${DATABASE_TYPE}) initialized successfully`);
+}
+
+// Vision + Lotus LLM
+const visionClient = new ImageAnnotatorClient();
+// Remove Gemini - using Lotus LLM only
+
+app.post('/api/extract-text-only', upload.single('file'), async (req, res) => {
+  console.log('Incoming request to /api/extract-text-only');
+
+  const file = req.file;
+  if (!file) {
+    return res.status(400).json({ message: 'No file uploaded' });
+  }
+
+  const selectedPagesRaw = req.body.pages || 'all';
+  const selectedPages = selectedPagesRaw.toLowerCase() === 'all'
+    ? []
+    : selectedPagesRaw.split(',').map(p => parseInt(p.trim(), 10)).filter(n => !isNaN(n));
+
+  const ext = path.extname(file.originalname).toLowerCase();
+  const localFilePath = path.join(__dirname, file.path);
+  console.log(`[Local OCR] Processing file locally: ${localFilePath}`);
+  let combinedText = '';
+
+  try {
+    if (ext === '.pdf') {
+      console.log('[🚀 Local OCR] Processing PDF with local file...');
+      
+      // Read file as buffer for local processing
+      const fileBuffer = fs.readFileSync(localFilePath);
+      
+      const request = {
+        inputConfig: {
+          content: fileBuffer.toString('base64'),
+          mimeType: 'application/pdf',
+        },
+        features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
+      };
+      if (selectedPages.length > 0) request.pages = selectedPages;
+
+      console.log('[🔁 OCR] Processing PDF with chunked approach for full document...');
+      
+      // Process in chunks of 5 pages to handle full PDF documents
+      if (selectedPages.length === 0) {
+        // Process all pages in chunks of 5
+        let currentPage = 1;
+        let hasMorePages = true;
+        
+        while (hasMorePages) {
+          const endPage = currentPage + 4; // 5 pages per chunk
+          const chunkRequest = {
+            inputConfig: {
+              content: fileBuffer.toString('base64'),
+              mimeType: 'application/pdf',
+            },
+            features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
+            pages: Array.from({length: 5}, (_, i) => currentPage + i).filter(p => p <= 50) // Reasonable max
+          };
+          
+          console.log(`[🔁 OCR] Processing pages ${currentPage}-${endPage}...`);
+          
+          try {
+            const [chunkResult] = await visionClient.batchAnnotateFiles({ requests: [chunkRequest] });
+            
+            if (chunkResult.responses && chunkResult.responses.length > 0) {
+              const chunkResponses = chunkResult.responses[0].responses || [];
+              console.log(`[✅ OCR] Chunk ${currentPage}-${endPage}: ${chunkResponses.length} pages processed`);
+              
+              if (chunkResponses.length === 0) {
+                hasMorePages = false;
+                break;
+              }
+              
+              // Process responses with correct page numbers
+              chunkResponses.forEach((page, i) => {
+                const actualPageNum = currentPage + i;
+                const text = page.fullTextAnnotation?.text || '';
+                if (text.trim()) {
+                  combinedText += `\n\nFile: ${file.originalname} — Page ${actualPageNum}\n${text}`;
+                  console.log(`[📄 OCR] Page ${actualPageNum}: ${text.length} characters extracted`);
+                }
+              });
+              
+              // If we got fewer pages than expected, we've reached the end
+              if (chunkResponses.length < 5) {
+                hasMorePages = false;
+              }
+              
+              currentPage += 5;
+            } else {
+              hasMorePages = false;
+            }
+          } catch (chunkError) {
+            console.warn(`[⚠️ OCR] Chunk ${currentPage}-${endPage} failed:`, chunkError.message);
+            hasMorePages = false;
+          }
+          
+          // Add delay between chunks to avoid rate limiting
+          if (hasMorePages) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        }
+        
+        console.log(`[✅ OCR] Completed chunked processing, total pages processed: ${Math.floor((currentPage - 1) / 5) * 5}`);
+        
+      } else {
+        // Process specific pages (original logic)
+        const [result] = await visionClient.batchAnnotateFiles({ requests: [request] });
+        console.log('[✅ OCR] Specific pages batchAnnotateFiles completed');
+
+        if (result.responses && result.responses.length > 0) {
+          const responses = result.responses[0].responses || [];
+          console.log('[🔍 Debug] Available page indices:', responses.map((_, i) => selectedPages[i] || i + 1));
+          responses.forEach((page, i) => {
+            const text = page.fullTextAnnotation?.text || '';
+            const pageNum = selectedPages[i] || (i + 1);
+            combinedText += `\n\nFile: ${file.originalname} — Page ${pageNum}\n${text}`;
+          });
+        }
+      }
+    } else {
+      console.log('[🚀 Local OCR] Processing image with local file...');
+      const fileBuffer = fs.readFileSync(localFilePath);
+      const [result] = await visionClient.textDetection({
+        image: { content: fileBuffer },
+      });
+      const detections = result.textAnnotations;
+      if (detections && detections.length > 0) {
+        const text = detections[0].description || '';
+        combinedText += `\n\nFile: ${file.originalname}\n${text}`;
+      }
+    }
+
+    console.log('[📤 OCR Text Ready]');
+    res.json({ success: true, text: combinedText });
+  } catch (err) {
+    console.error('[❌ OCR Extraction Error]', err);
+    res.status(500).json({ message: 'OCR extraction failed', error: err.message });
+  } finally {
+    fs.unlinkSync(localFilePath);
+  }
+});
+
+
+// ===== OCR Handler =====
+app.post('/api/extract-text', upload.array('files'), async (req, res) => {
+  console.log('Incoming request to /api/extract-text');
+  const files = req.files;
+  const promptKey = req.body.promptKey || req.body.contractType || 'permanent_fixed';
+  const contractType = req.body.contractType || (req.body.promptKey?.includes('service_express') ? 'service_express' : 'permanent_fixed');
+  const selectedPagesRaw = req.body.pages || 'all';
+  const selectedPages = selectedPagesRaw.toLowerCase() === 'all'
+    ? []
+    : selectedPagesRaw.split(',').map(p => parseInt(p.trim(), 10)).filter(n => !isNaN(n));
+
+  if (!files?.length) {
+    console.error('[❌ No files uploaded]');
+    return res.status(400).json({ message: 'No files uploaded' });
+  }
+
+  // Use PromptManager to get legacy-compatible prompt
+  const promptManager = new PromptManager();
+  let promptTemplate;
+  try {
+    promptTemplate = promptManager.createLegacyExtractionPrompt(contractType, 'pdf');
+    console.log(`[✅ Loaded modular extraction prompt for ${contractType}]`);
+  } catch (err) {
+    console.error('[❌ Failed to load extraction prompt]', err);
+    return res.status(400).json({ message: 'Failed to load extraction prompt', error: err.message });
+  }
+
+  let combinedText = '';
+  let lowestConfidence = 1.0; // Track lowest confidence score across all pages
+
+  for (const file of files) {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const localFilePath = path.join(__dirname, file.path);
+    console.log(`[Local OCR] Processing file locally: ${localFilePath}`);
+
+    if (ext === '.pdf') {
+      console.log('[🚀 Local OCR] Processing PDF with chunked approach for full document...');
+      
+      // Read file as buffer for local processing
+      const fileBuffer = fs.readFileSync(localFilePath);
+      
+      const request = {
+        inputConfig: {
+          content: fileBuffer.toString('base64'),
+          mimeType: 'application/pdf',
+        },
+        features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
+      };
+      if (selectedPages.length > 0) request.pages = selectedPages;
+
+      console.log('[🔁 OCR] Processing PDF with chunked approach for full document...');
+      
+      let extracted = '';
+      
+      // Process in chunks of 5 pages to handle full PDF documents
+      if (selectedPages.length === 0) {
+        // Process all pages in chunks of 5
+        let currentPage = 1;
+        let hasMorePages = true;
+        
+        while (hasMorePages) {
+          const endPage = currentPage + 4; // 5 pages per chunk
+          const chunkRequest = {
+            inputConfig: {
+              content: fileBuffer.toString('base64'),
+              mimeType: 'application/pdf',
+            },
+            features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
+            pages: Array.from({length: 5}, (_, i) => currentPage + i).filter(p => p <= 50) // Reasonable max
+          };
+          
+          console.log(`[🔁 OCR] Processing pages ${currentPage}-${endPage}...`);
+          
+          try {
+            const [chunkResult] = await visionClient.batchAnnotateFiles({ requests: [chunkRequest] });
+            
+            if (chunkResult.responses && chunkResult.responses.length > 0) {
+              const chunkResponses = chunkResult.responses[0].responses || [];
+              console.log(`[✅ OCR] Chunk ${currentPage}-${endPage}: ${chunkResponses.length} pages processed`);
+              
+              if (chunkResponses.length === 0) {
+                hasMorePages = false;
+                break;
+              }
+              
+              // Process responses with correct page numbers
+              chunkResponses.forEach((page, i) => {
+                const actualPageNum = currentPage + i;
+                const text = page.fullTextAnnotation?.text || '';
+                if (text.trim()) {
+                  extracted += `\n\nFile: ${file.originalname} — Page ${actualPageNum}\n${text}`;
+                  console.log(`[📄 OCR] Page ${actualPageNum}: ${text.length} characters extracted`);
+                }
+                
+                // Extract confidence scores from pages
+                if (page.fullTextAnnotation?.pages) {
+                  page.fullTextAnnotation.pages.forEach(p => {
+                    if (p.confidence !== undefined && p.confidence < lowestConfidence) {
+                      lowestConfidence = p.confidence;
+                      console.log(`[OCR Confidence] Page ${actualPageNum}: ${(p.confidence * 100).toFixed(1)}%`);
+                    }
+                  });
+                }
+              });
+              
+              // If we got fewer pages than expected, we've reached the end
+              if (chunkResponses.length < 5) {
+                hasMorePages = false;
+              }
+              
+              currentPage += 5;
+            } else {
+              hasMorePages = false;
+            }
+          } catch (chunkError) {
+            console.warn(`[⚠️ OCR] Chunk ${currentPage}-${endPage} failed:`, chunkError.message);
+            hasMorePages = false;
+          }
+          
+          // Add delay between chunks to avoid rate limiting
+          if (hasMorePages) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        }
+        
+        console.log(`[✅ OCR] Completed chunked processing, total pages processed: ${Math.floor((currentPage - 1) / 5) * 5}`);
+        
+      } else {
+        // Process specific pages (original logic)
+        const [result] = await visionClient.batchAnnotateFiles({ requests: [request] });
+        console.log('[✅ OCR] Specific pages batchAnnotateFiles completed');
+
+        // Debug: Log the response structure
+        console.log('[🔍 Debug] Vision API response structure (extract-text):');
+        console.log('- result.responses length:', result.responses?.length || 0);
+        if (result.responses && result.responses.length > 0) {
+          console.log('- responses[0].responses length:', result.responses[0].responses?.length || 0);
+          console.log('- Available page indices:', result.responses[0].responses?.map((_, i) => selectedPages[i] || i + 1) || []);
+        }
+
+        // Process results directly from response
+        if (result.responses && result.responses.length > 0) {
+          const responses = result.responses[0].responses || [];
+          responses.forEach((page, i) => {
+            const text = page.fullTextAnnotation?.text || '';
+            const pageNum = selectedPages[i] || (i + 1);
+            extracted += `\n\nFile: ${file.originalname} — Page ${pageNum}\n${text}`;
+            
+            // Extract confidence scores from pages
+            if (page.fullTextAnnotation?.pages) {
+              page.fullTextAnnotation.pages.forEach(p => {
+                if (p.confidence !== undefined && p.confidence < lowestConfidence) {
+                  lowestConfidence = p.confidence;
+                  console.log(`[OCR Confidence] Page ${pageNum}: ${(p.confidence * 100).toFixed(1)}%`);
+                }
+              });
+            }
+          });
+        }
+      }
+
+      combinedText += extracted;
+    } else {
+      console.log('[🚀 Local OCR] Processing image with local file...');
+      const fileBuffer = fs.readFileSync(localFilePath);
+      const [result] = await visionClient.textDetection({
+        image: { content: fileBuffer },
+      });
+      const detections = result.textAnnotations;
+      if (detections && detections.length > 0) {
+        const text = detections[0].description || '';
+        combinedText += `\n\nFile: ${file.originalname}\n${text}`;
+      }
+      
+      // Extract confidence for non-PDF files
+      if (result.fullTextAnnotation?.pages) {
+        result.fullTextAnnotation.pages.forEach(page => {
+          if (page.confidence !== undefined && page.confidence < lowestConfidence) {
+            lowestConfidence = page.confidence;
+            console.log(`[OCR Confidence] Single file: ${(page.confidence * 100).toFixed(1)}%`);
+          }
+        });
+      }
+    }
+
+    console.log('[📥 Upload Check] Files received:', req.files?.length);
+    fs.unlinkSync(localFilePath);
+  }
+
+  console.log(`[OCR Confidence] Lowest confidence score across document: ${(lowestConfidence * 100).toFixed(1)}%`);
+
+  // === Helper function to chunk text for token limits ===
+  function chunkText(text, numChunks = 50) {
+    const words = text.split(/\s+/);
+    const wordsPerChunk = Math.ceil(words.length / numChunks);
+    const chunks = [];
+    
+    for (let i = 0; i < numChunks; i++) {
+      const start = i * wordsPerChunk;
+      const end = Math.min(start + wordsPerChunk, words.length);
+      const chunk = words.slice(start, end).join(' ');
+      if (chunk.trim()) {
+        chunks.push(chunk.trim());
+      }
+    }
+    
+    return chunks;
+  }
+
+  // === Quick contract type determination ===
+  async function determineContractType(text) {
+    const shortText = text.substring(0, 5000); // Use first 5k chars for quick analysis
+    
+    try {
+      const response = await axios.post(LOTUS_LLM_URL, {
+        model: 'default',
+        messages: [
+          { role: 'system', content: 'You are a contract classifier. Analyze the text and return ONLY "permanent_fixed" or "service_express" based on contract type.' },
+          { role: 'user', content: `Analyze this contract text and determine if it is "permanent_fixed" or "service_express" type. Look for indicators like lease terms, payment structure, contract duration. Return only one word: "permanent_fixed" or "service_express".\n\nText:\n${shortText}` }
+        ],
+        temperature: 0.1,
+        max_tokens: 50,
+        chat_template_kwargs: { enable_thinking: false }
+      }, {
+        headers: {
+          'Authorization': `Bearer ${LOTUS_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 30000
+      });
+      
+      const result = response.data.choices[0].message.content.trim().toLowerCase();
+      return result.includes('service_express') ? 'service_express' : 'permanent_fixed';
+      
+    } catch (error) {
+      console.warn('[⚠️ Contract type determination failed, defaulting to permanent_fixed]', error.message);
+      return 'permanent_fixed';
+    }
+  }
+
+
+  // === Legacy adaptive chunking (fallback) ===
+  async function processWithAdaptiveChunking(text, promptTemplate, numChunks = 50) {
+    console.log(`[📊 Legacy chunking with ${numChunks} chunks] Text length: ${text.length} chars`);
+    
+    const textChunks = chunkText(text, numChunks);
+    const chunkResults = [];
+    let has400Error = false;
+    
+    for (let chunkIndex = 0; chunkIndex < textChunks.length; chunkIndex++) {
+      const chunk = textChunks[chunkIndex];
+      const chunkPrompt = `${promptTemplate}\n\nText (Part ${chunkIndex + 1} of ${textChunks.length}):\n${chunk}`;
+      
+      // Estimate tokens for this chunk request
+      const chunkRequestTokens = Math.round((chunkPrompt.length / 4) + 100); // Rough estimation: 4 chars per token + system message
+      console.log(`[📄 Processing chunk ${chunkIndex + 1}/${textChunks.length}] ${chunk.split(/\s+/).length} words, ~${chunkRequestTokens} estimated tokens`);
+      
+      // Safety check - if this chunk is still too large, try with more chunks
+      if (chunkRequestTokens > 20000) {
+        console.warn(`[⚠️ Chunk ${chunkIndex + 1} still too large (${chunkRequestTokens} tokens), retrying with more chunks]`);
+        return await processWithAdaptiveChunking(text, promptTemplate, numChunks + 25);
+      }
+      
+      let chunkAttempt = 1;
+      const maxAttempts = 3;
+      
+      while (chunkAttempt <= maxAttempts) {
+        try {
+          const response = await axios.post(LOTUS_LLM_URL, {
+            model: 'default',
+            messages: [
+              { role: 'system', content: 'You are a helpful assistant that extracts information from documents and returns only valid JSON.' },
+              { role: 'user', content: chunkPrompt }
+            ],
+            temperature: 0.1,
+            max_tokens: 1500, // Extremely conservative - keep total under 25k
+            chat_template_kwargs: { enable_thinking: false }
+          }, {
+            headers: {
+              'Authorization': `Bearer ${LOTUS_API_KEY}`,
+              'Content-Type': 'application/json'
+            },
+            timeout: 120000
+          });
+          
+          let chunkLotusText = response.data.choices[0].message.content;
+          
+          // Check if response is JSON-like
+          if (chunkLotusText && !chunkLotusText.trim().includes('{') && !chunkLotusText.trim().includes('[')) {
+            console.error(`[⚠️ Chunk ${chunkIndex + 1} returned plain text, retrying...]`);
+            
+            const retryPrompt = `${chunkPrompt}\n\nIMPORTANT: Return ONLY valid JSON format, no explanatory text.`;
+            const retryResponse = await axios.post(LOTUS_LLM_URL, {
+              model: 'default',
+              messages: [
+                { role: 'system', content: 'You are a helpful assistant that extracts information from documents and returns only valid JSON.' },
+                { role: 'user', content: retryPrompt }
+              ],
+              temperature: 0.1,
+              max_tokens: 2000,
+              chat_template_kwargs: { enable_thinking: false }
+            }, {
+              headers: {
+                'Authorization': `Bearer ${LOTUS_API_KEY}`,
+                'Content-Type': 'application/json'
+              },
+              timeout: 120000
+            });
+            chunkLotusText = retryResponse.data.choices[0].message.content;
+          }
+          
+          chunkResults.push(chunkLotusText);
+          console.log(`[✅ PDF extraction chunk ${chunkIndex + 1}/${textChunks.length} successful]`);
+          break;
+          
+        } catch (fetchError) {
+          console.warn(`[⚠️ PDF extraction chunk ${chunkIndex + 1} attempt ${chunkAttempt} failed]`, fetchError.message);
+          
+          // Check for 400 error
+          if (fetchError.response?.status === 400) {
+            has400Error = true;
+            console.warn(`[📊 400 Error detected] Will try with more chunks if this continues`);
+          }
+          
+          if (chunkAttempt === maxAttempts) {
+            // If this is the last attempt for this chunk and we got 400 errors, try with more chunks
+            if (has400Error && numChunks < 100) {
+              console.log(`[🔄 400 errors detected, retrying entire text with ${numChunks + 25} chunks]`);
+              return await processWithAdaptiveChunking(text, promptTemplate, numChunks + 25);
+            }
+            throw new Error(`Failed to process chunk ${chunkIndex + 1} after ${maxAttempts} attempts`);
+          }
+          
+          // Wait before retry
+          const waitTime = Math.min(1000 * Math.pow(2, chunkAttempt - 1), 30000);
+          console.log(`[⏳ PDF extraction chunk ${chunkIndex + 1} waiting ${waitTime}ms before retry...]`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          chunkAttempt++;
+        }
+      }
+    }
+    
+    return chunkResults.join('\n\n');
+  }
+
+  // === Lotus LLM Processing with Chunking ===
+  // Check if text is too large and needs chunking
+  const estimatedTokens = combinedText.split(/\s+/).length * 1.3; // Rough token estimation
+  const MAX_TOKENS = 1000; // Ultra conservative - force aggressive chunking
+  
+  let lotusText;
+  let attempt = 1;
+  
+  if (estimatedTokens > MAX_TOKENS) {
+    console.log(`[🧠 Large text detected] Estimated ${Math.round(estimatedTokens)} tokens, using smart field-specific processing`);
+    console.log(`[🔍 Using already determined contract type] ${contractType}`);
+    
+    try {
+      // Use the cleaner sequential processor for field extraction
+      const extractedFields = await sequentialProcessor.processSequential(combinedText, contractType, 'pdf');
+      lotusText = JSON.stringify(extractedFields, null, 2);
+      console.log(`[✅ Sequential field extraction completed] ${Object.keys(extractedFields).length} fields extracted`);
+    } catch (error) {
+      console.error('[❌ Sequential field extraction failed, falling back to legacy method]', error.message);
+      lotusText = await processWithAdaptiveChunking(combinedText, promptTemplate, 50);
+    }
+    
+  } else {
+    // Process normally for small texts
+    const finalPrompt = `${promptTemplate}\n\nText:\n${combinedText}`;
+    
+    while (true) {
+      try {
+        const response = await axios.post(LOTUS_LLM_URL, {
+          model: 'default',
+          messages: [
+            { role: 'system', content: 'You are a helpful assistant that extracts information from documents and returns only valid JSON.' },
+            { role: 'user', content: finalPrompt }
+          ],
+          temperature: 0.1,
+          max_tokens: 1500,
+          chat_template_kwargs: { enable_thinking: false }
+        }, {
+          headers: {
+            'Authorization': `Bearer ${LOTUS_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 120000
+        });
+        
+        lotusText = response.data.choices[0].message.content;
+        
+        // Check if response is JSON-like
+        if (lotusText && !lotusText.trim().includes('{') && !lotusText.trim().includes('[')) {
+          console.error('[⚠️ Lotus LLM returned plain text instead of JSON, retrying...]');
+          console.error('[📝 Response preview]:', lotusText.substring(0, 200));
+          
+          const retryPrompt = `${finalPrompt}\n\nIMPORTANT: Return ONLY valid JSON format, no explanatory text.`;
+          const retryResponse = await axios.post(LOTUS_LLM_URL, {
+            model: 'default',
+            messages: [
+              { role: 'system', content: 'You are a helpful assistant that extracts information from documents and returns only valid JSON.' },
+              { role: 'user', content: retryPrompt }
+            ],
+            temperature: 0.1,
+            max_tokens: 5000,
+            chat_template_kwargs: { enable_thinking: false }
+          }, {
+            headers: {
+              'Authorization': `Bearer ${LOTUS_API_KEY}`,
+              'Content-Type': 'application/json'
+            },
+            timeout: 120000
+          });
+          lotusText = retryResponse.data.choices[0].message.content;
+        }
+        
+        console.log('[✅ PDF extraction Lotus LLM API call successful]');
+        break;
+        
+      } catch (fetchError) {
+        console.warn(`[⚠️ PDF extraction attempt ${attempt} failed]`, fetchError.message);
+        
+        // Log detailed error information for debugging
+        if (fetchError.response) {
+          console.warn(`[📊 Error Status] ${fetchError.response.status} - ${fetchError.response.statusText}`);
+          if (fetchError.response.data) {
+            console.warn(`[📋 Error Data]`, JSON.stringify(fetchError.response.data, null, 2));
+          }
+          if (fetchError.response.headers) {
+            console.warn(`[📄 Response Headers]`, JSON.stringify(fetchError.response.headers, null, 2));
+          }
+        }
+        
+        // Wait before retry (exponential backoff with max cap)
+        const waitTime = Math.min(1000 * Math.pow(2, Math.min(attempt - 1, 6)), 60000); // Cap at 60 seconds
+        console.log(`[⏳ PDF extraction waiting ${waitTime}ms before retry...]`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        attempt++;
+      }
+    }
+  }
+
+  // === Extract contract number ===
+  let docId = 'unknown';
+  try {
+    // Use robust JSON cleaning similar to autoProcessor.js
+    const cleaned = cleanLotusJson(lotusText);
+    const parsed = JSON.parse(cleaned);
+    if (parsed["Contract Number"]) {
+      docId = parsed["Contract Number"].trim().replace(/\//g, '_');
+    }
+  } catch (err) {
+    console.warn('[Firestore Save] Failed to extract contract number:', err.message);
+  }
+
+  // Helper function for cleaning Lotus LLM JSON responses
+  function cleanLotusJson(raw) {
+    try {
+      if (!raw) return '{}';
+  
+      let cleaned = raw.trim();
+      
+      // Check for multiple JSON blocks pattern
+      const jsonBlockPattern = /```json\s*(\{[\s\S]*?\})\s*```/gi;
+      const matches = [...cleaned.matchAll(jsonBlockPattern)];
+      
+      if (matches.length > 1) {
+        console.log(`[🔍 Detected ${matches.length} JSON blocks, merging them]`);
+        
+        // Merge multiple JSON objects into one
+        let mergedObject = {};
+        
+        for (const match of matches) {
+          try {
+            const jsonStr = match[1].trim();
+            const parsedBlock = JSON.parse(jsonStr);
+            
+            // Merge this block into the main object
+            mergedObject = { ...mergedObject, ...parsedBlock };
+          } catch (blockErr) {
+            console.warn('[⚠️ Failed to parse individual JSON block]', blockErr.message);
+          }
+        }
+        
+        return JSON.stringify(mergedObject);
+      }
+  
+      // Single block processing (existing logic)
+      // Remove Markdown triple backticks and optional 'json' hint
+      cleaned = cleaned.replace(/^```json\s*/i, '').replace(/```$/g, '');
+  
+      // Remove invalid control characters
+      cleaned = cleaned.replace(/[\u0000-\u001F\u007F]/g, '');
+  
+      // Normalize smart quotes to standard quotes
+      cleaned = cleaned.replace(/[""]/g, '"').replace(/['']/g, "'");
+  
+      // Escape lone backslashes (those not followed by escape characters)
+      cleaned = cleaned.replace(/\\(?!["\\/bfnrtu])/g, '\\\\');
+  
+      // Remove trailing commas before closing braces/brackets
+      cleaned = cleaned.replace(/,\s*}/g, '}').replace(/,\s*]/g, ']');
+      
+      // Fix NULL values - convert uppercase NULL to lowercase null for valid JSON
+      cleaned = cleaned.replace(/:\s*NULL(\s*[,}\]])/g, ': null$1');
+      
+      // Also handle NULL in arrays and other contexts
+      cleaned = cleaned.replace(/\[\s*NULL\s*\]/g, '[null]');
+      cleaned = cleaned.replace(/,\s*NULL\s*,/g, ', null,');
+      cleaned = cleaned.replace(/,\s*NULL\s*}/g, ', null}');
+      cleaned = cleaned.replace(/,\s*NULL\s*]/g, ', null]');
+  
+      return cleaned;
+    } catch (err) {
+      console.error('[cleanLotusJson] ERROR:', err.message);
+      return raw;
+    }
+  }
+
+  // === Save to Firebase ===
+  await db.collection('vision_results').doc(docId).set({
+    timestamp: new Date(),
+    extracted_text: combinedText,
+    lotus_response: lotusText,
+    prompt_key: promptKey,
+    ocr_confidence: lowestConfidence
+  });
+
+  console.log(`[📤 OCR Confidence] Saved confidence: ${(lowestConfidence * 100).toFixed(1)}% for document: ${docId}`);
+
+  console.log(`[📤 Firebase] Document saved as ID: ${docId}`);
+  res.json({ success: true, text: combinedText, lotusOutput: lotusText });
+});
+
+// ===== NEW SEQUENTIAL PROCESSING ENDPOINTS =====
+
+// Initialize sequential processor
+const sequentialProcessor = new SequentialProcessor();
+
+// Sequential text extraction endpoint
+app.post('/api/extract-text-sequential', upload.array('files'), async (req, res) => {
+  console.log('Incoming request to /api/extract-text-sequential');
+  console.log('Request body contractType:', req.body.contractType);
+  console.log('Request body keys:', Object.keys(req.body));
+  const files = req.files;
+  const contractType = req.body.contractType || 'permanent_fixed';
+  console.log('Final contractType used:', contractType);
+  const selectedPagesRaw = req.body.pages || 'all';
+  const selectedPages = selectedPagesRaw.toLowerCase() === 'all'
+    ? []
+    : selectedPagesRaw.split(',').map(p => parseInt(p.trim(), 10)).filter(p => !isNaN(p));
+
+  if (!files || files.length === 0) {
+    return res.status(400).json({ message: 'No files uploaded' });
+  }
+
+  let combinedText = '';
+  let lowestConfidence = 1.0; // Track lowest confidence score across all pages
+
+  // OCR processing (using the same GCS-based approach as working legacy endpoint)
+  for (const file of files) {
+    try {
+      console.log(`[Sequential OCR] Processing file: ${file.originalname}, path: ${file.path}`);
+      
+      const ext = path.extname(file.originalname).toLowerCase();
+      const localFilePath = path.join(__dirname, file.path);
+      console.log(`[Sequential OCR] Processing file locally: ${localFilePath}`);
+      
+      if (ext === '.pdf') {
+        // Use the same batch processing approach as legacy endpoint for PDFs
+        const outputPrefix = `vision-output/${path.parse(file.originalname).name}_${Date.now()}/`;
+        
+        // Read file as buffer for local processing
+        const fileBuffer = fs.readFileSync(localFilePath);
+        
+        const request = {
+          inputConfig: {
+            content: fileBuffer.toString('base64'),
+            mimeType: 'application/pdf',
+          },
+          features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
+        };
+        if (selectedPages.length > 0) request.pages = selectedPages;
+
+        console.log('[Sequential OCR] Starting batchAnnotateFiles with local content...');
+        const [result] = await visionClient.batchAnnotateFiles({ requests: [request] });
+        console.log('[Sequential OCR] batchAnnotateFiles completed');
+        // Process results directly from response
+        if (result.responses && result.responses.length > 0) {
+          const responses = result.responses[0].responses || [];
+          responses.forEach((response, i) => {
+            const page = response.fullTextAnnotation;
+            if (page?.text) {
+              const text = page.text;
+              combinedText += `\n\nFile: ${file.originalname} — Page ${i + 1}\n${text}`;
+              
+              // Extract confidence scores from pages
+              if (page.pages) {
+                page.pages.forEach(p => {
+                  if (p.confidence !== undefined && p.confidence < lowestConfidence) {
+                    lowestConfidence = p.confidence;
+                    console.log(`[OCR Confidence] Page ${i + 1}: ${(p.confidence * 100).toFixed(1)}%`);
+                  }
+                });
+              }
+            }
+          });
+        }
+      } else {
+        console.log('[Sequential Local OCR] Processing image with local file...');
+        const fileBuffer = fs.readFileSync(localFilePath);
+        const [result] = await visionClient.textDetection({
+          image: { content: fileBuffer },
+        });
+        const detections = result.textAnnotations;
+        if (detections && detections.length > 0) {
+          const text = detections[0].description || '';
+          combinedText += `\n\nFile: ${file.originalname}\n${text}`;
+        }
+        
+        // Extract confidence for non-PDF files
+        if (result.fullTextAnnotation?.pages) {
+          result.fullTextAnnotation.pages.forEach(page => {
+            if (page.confidence !== undefined && page.confidence < lowestConfidence) {
+              lowestConfidence = page.confidence;
+              console.log(`[OCR Confidence] Single file: ${(page.confidence * 100).toFixed(1)}%`);
+            }
+          });
+        }
+      }
+      
+      console.log(`[Sequential OCR] Text extracted from ${file.originalname}: ${combinedText.length - (combinedText.lastIndexOf(`File: ${file.originalname}`) || 0)} characters`);
+      
+    } catch (visionError) {
+      console.error(`[❌ Sequential OCR Error] ${file.originalname}:`, visionError);
+      return res.status(500).json({ message: 'OCR processing failed', error: visionError.message });
+    }
+
+    // Clean up local file
+    fs.unlinkSync(file.path);
+  }
+  
+  console.log(`[OCR Confidence] Lowest confidence score across document: ${(lowestConfidence * 100).toFixed(1)}%`);
+
+  if (!combinedText.trim()) {
+    console.error('[Sequential] No text extracted from uploaded files');
+    return res.status(400).json({ message: 'No text extracted from uploaded files' });
+  }
+
+  console.log(`[Sequential] Total combined text length: ${combinedText.length}`);
+
+  try {
+    // Use sequential processing (contract type should already be correctly detected by the main flow)
+    console.log(`[Sequential] Starting sequential processing for contract type: ${contractType}`);
+    const extractedData = await sequentialProcessor.processSequential(combinedText, contractType, 'pdf');
+    
+    console.log(`[Sequential] Extracted ${Object.keys(extractedData).length} fields`);
+    console.log(`[Sequential] Available fields: ${Object.keys(extractedData).slice(0, 5).join(', ')}...`);
+    
+    // Save to Firebase (using combined result as JSON string)
+    const contractNumber = extractedData['Contract Number'] || extractedData['Contract number'] || 'unknown';
+    const docId = typeof contractNumber === 'string' ? contractNumber.replace(/\//g, '_') : 'unknown';
+    
+    console.log(`[🔍 Contract Number Debug] Extracted from PDF: "${contractNumber}"`);
+    console.log(`[🔍 Contract Number Debug] Document ID for vision_results: "${docId}"`);
+    
+    await db.collection('vision_results').doc(docId).set({
+      timestamp: new Date(),
+      extracted_text: combinedText,
+      lotus_response: JSON.stringify(extractedData, null, 2),
+      prompt_key: `sequential_${contractType}`,
+      processing_method: 'sequential',
+      ocr_confidence: lowestConfidence
+    });
+
+    console.log(`[📤 Firebase] Sequential processing saved as ID: ${docId}`);
+    console.log(`[📤 OCR Confidence] Saved confidence: ${(lowestConfidence * 100).toFixed(1)}% for document: ${docId}`);
+    console.log(`[📤 OCR Confidence] This confidence will be available in compare_result when save-compare-result is called`);
+    res.json({ 
+      success: true, 
+      text: combinedText, 
+      lotusOutput: JSON.stringify(extractedData, null, 2),
+      extractedData: extractedData,
+      processingMethod: 'sequential',
+      ocrConfidence: lowestConfidence
+    });
+
+  } catch (err) {
+    console.error('[❌ Sequential Processing Error]', err);
+    res.status(500).json({ message: 'Sequential processing failed', error: err.message });
+  }
+});
+
+// Sequential validation endpoint
+app.post('/api/validate-sequential', async (req, res) => {
+  try {
+    const { extractedData, contractType, contractNumber, sourceType = 'pdf' } = req.body;
+
+    if (!extractedData || typeof extractedData !== 'object') {
+      return res.status(400).json({ message: 'Invalid extractedData' });
+    }
+
+    console.log(`[Sequential Validation] Processing ${sourceType.toUpperCase()} validation for ${contractType || 'unknown'} contract: ${contractNumber || 'unknown'}`);
+    const validationResults = await sequentialProcessor.processValidation(extractedData, contractType, contractNumber, sourceType);
+    
+    res.json({
+      success: true,
+      validation: validationResults,
+      processingMethod: 'sequential'
+    });
+
+  } catch (err) {
+    console.error('[❌ Sequential Validation Error]', err);
+    res.status(500).json({ message: 'Sequential validation failed', error: err.message });
+  }
+});
+
+// Sequential comparison endpoint
+app.post('/api/compare-sequential', async (req, res) => {
+  try {
+    const { pdfData, webData, contractType, contractNumber } = req.body;
+
+    if (!pdfData || !webData) {
+      return res.status(400).json({ message: 'Missing pdfData or webData' });
+    }
+
+    console.log(`[Sequential Comparison] Processing ${contractType || 'unknown'} contract: ${contractNumber || 'unknown'}`);
+    const comparisonResults = await sequentialProcessor.processComparison(pdfData, webData, contractType, contractNumber);
+    
+    res.json({
+      success: true,
+      comparison: comparisonResults,
+      processingMethod: 'sequential'
+    });
+
+  } catch (err) {
+    console.error('[❌ Sequential Comparison Error]', err);
+    res.status(500).json({ message: 'Sequential comparison failed', error: err.message });
+  }
+});
+
+// Sequential web scraping endpoint
+app.post('/api/scrape-url-sequential', async (req, res) => {
+  console.log('[Sequential] Incoming request to /api/scrape-url-sequential');
+  const { systemType = 'simplicity', contractType = 'permanent_fixed', contractNumber } = req.body;
+
+  if (!contractNumber) {
+    return res.status(400).json({ success: false, message: 'Contract number required' });
+  }
+
+  let browser;
+  let scrapedText = '';
+
+  try {
+    // Reuse existing browser session or create new one
+    if (browserSessions.has(systemType)) {
+      const session = browserSessions.get(systemType);
+      
+      // Validate that session is still connected and functional
+      try {
+        if (!session || !session.browser || typeof session.browser.pages !== 'function') {
+          throw new Error('Browser session invalid or missing pages method');
+        }
+        await session.browser.pages(); // Test if browser is still valid
+        browser = session.browser;
+      } catch (browserError) {
+        console.warn('[Sequential Web] Existing browser session invalid, creating new one:', browserError.message);
+        try {
+          if (session && session.browser) {
+            await session.browser.close();
+          }
+        } catch (closeError) {
+          // Ignore close errors
+        }
+        browserSessions.delete(systemType);
+        browser = await puppeteer.launch({ 
+          headless: false,
+          protocolTimeout: 300000 // 5 minutes timeout
+        });
+        const page = await browser.newPage();
+        page.setDefaultTimeout(0); // Disable all timeouts
+        page.setDefaultNavigationTimeout(0); // Disable navigation timeouts
+        browserSessions.set(systemType, { browser, page });
+      }
+    } else {
+      browser = await puppeteer.launch({ 
+        headless: false,
+        protocolTimeout: 300000 // 5 minutes timeout
+      });
+      const page = await browser.newPage();
+      page.setDefaultTimeout(0); // Disable all timeouts
+      page.setDefaultNavigationTimeout(0); // Disable navigation timeouts
+      browserSessions.set(systemType, { browser, page });
+    }
+
+    const pages = await browser.pages();
+    let popup = pages.find(page => page.url().includes('simplicity'));
+    
+    if (!popup) {
+      console.log('[Sequential Web] No existing Simplicity page found, please login first');
+      return res.status(400).json({ 
+        success: false, 
+        message: 'No active Simplicity session found. Please login first via /api/scrape-login' 
+      });
+    }
+
+    // Navigate and scrape (reusing existing logic)
+    const searchUrl = `https://simplicity.lotuss.com/module/lease/offer/view_lease_offer_detail.php?search_data=${contractNumber}`;
+    await popup.goto(searchUrl, { waitUntil: 'networkidle0', timeout: 0 });
+    
+    scrapedText = await popup.evaluate(() => document.body.innerText);
+    console.log('[Sequential Web] Scraped content length:', scrapedText.length);
+
+    // Use sequential processing for web data
+    const extractedData = await sequentialProcessor.processSequential(scrapedText, contractType, 'web');
+    
+    // ─── METER CHECK for Sequential Processing ─────────────────
+    let utilityRaw = null;
+    let meterValidation = null;
+
+    // Debug the Include Utility field
+    console.log('[Sequential Utility Debug] extractedData["Include Utility"]:', extractedData['Include Utility']);
+    console.log('[Sequential Utility Debug] contractNumber:', contractNumber);
+    console.log('[Sequential Utility Debug] contractNumber.includes("LO"):', contractNumber.includes('LO'));
+    
+    // Check for variations in utility field name and value
+    const utilityValue = extractedData['Include Utility'] || extractedData['Utility'] || extractedData['Include utility'];
+    const isUtilityYes = utilityValue && (utilityValue.toLowerCase() === 'yes' || utilityValue.toLowerCase().includes('yes'));
+    
+    console.log('[Sequential Utility Debug] utilityValue (normalized):', utilityValue);
+    console.log('[Sequential Utility Debug] isUtilityYes:', isUtilityYes);
+    
+    if (isUtilityYes && contractNumber.includes('LO')) {
+      console.log('[Sequential Utility] Include Utility=Yes & LO… → scraping Meter…');
+
+      try {
+        // Navigate to meter page
+        await popup.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        console.log('[Sequential Utility] scrolled down');
+        await new Promise(r => setTimeout(r, 2000));
+
+        // Click Utilities top-menu
+        const utilSel = '#menu_MenuLiteralDiv > ul > li:nth-child(22) > a > div.cssmenu-item-label';
+        console.log('[Sequential Utility] clicking Utilities top-menu');
+        await popup.waitForSelector(utilSel, { visible: true, timeout: 20000 });
+        await popup.click(utilSel);
+
+        // Hover to expand submenu
+        console.log('[Sequential Utility] hovering Utilities submenu');
+        await popup.evaluate(() => {
+          const li = document.querySelector('#menu_MenuLiteralDiv > ul > li:nth-child(22)');
+          li?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        });
+        await new Promise(r => setTimeout(r, 10000));
+
+        // Click "Meter" submenu with robust retry
+        console.log('[Sequential Utility] clicking Meter submenu');
+        await robustClickMeterSubmenu(popup);
+        console.log('[Sequential Utility] Meter submenu clicked');
+
+        // Wait & switch to bottom iframe
+        await new Promise(r => setTimeout(r, 10000));
+        const frameHandle = await robustWaitForElement(popup, 'iframe[name="frameBottom"]', 20000);
+        const frame = await frameHandle.contentFrame();
+       
+        await new Promise(r => setTimeout(r, 10000));
+
+        // Combined Unit ID + Building ID search
+        console.log('[Sequential Utility] preparing combined Unit ID + Building ID search');
+
+        // Wait for the main search box
+        await frame.waitForSelector('#panel_SimpleSearch_c1', { visible: true, timeout: 20000 });
+
+        // Get Building ID from extracted data 
+        const buildingId = extractedData['Building ID'] || '';
+        console.log('[Sequential Utility] fetched Building ID:', buildingId);
+
+        // Build the combined search string
+        const unitId = extractedData['Unit ID'] || '';
+        const combinedSearch = buildingId ? `${unitId} ${buildingId}` : unitId;
+
+        console.log('[Sequential Utility] entering combined search:', combinedSearch);
+
+        // Clear & type the combined string
+        await frame.click('#panel_SimpleSearch_c1', { clickCount: 3 });
+        await frame.type('#panel_SimpleSearch_c1', combinedSearch, { delay: 50 });
+
+        // Click the initial Search button
+        console.log('[Sequential Utility] clicking Search');
+        await frame.evaluate(() => {
+          const btn = document.querySelector('a#panel_buttonSearch_bt');
+          btn?.click();
+        });
+        await new Promise(r => setTimeout(r, 15000));
+
+        // Scrape meter page content
+        utilityRaw = await frame.evaluate(() => document.body.innerText);
+        console.log('[Sequentsial Utility] scraped raw after combined search:', utilityRaw);
+
+        // Run meter validation using Lotus LLM
+        const meterPromptPath = path.join(__dirname, 'prompts', 'meter_check.txt');
+        if (fs.existsSync(meterPromptPath)) {
+          const meterTemplate = fs.readFileSync(meterPromptPath, 'utf8');
+          
+          // Add contract type and utility charges info for LO contracts
+          const isLOContract = contractNumber && contractNumber.includes('LO');
+          const contractInfo = isLOContract ? `\n\nCONTRACT_TYPE: LO
+WEB UTILITY CHARGES:
+- Utilities charge (Electricity): ${extractedData['Utilities charge (Electricity)'] || 0}
+- Utilities charge (water): ${extractedData['Utilities charge (water)'] || 0}  
+- Utilities charge (cooking gas): ${extractedData['Utilities charge (cooking gas)'] || 0}` : '\n\nCONTRACT_TYPE: NON-LO';
+          
+          const meterPrompt = `${meterTemplate}${contractInfo}\n\nMeter page content:\n${utilityRaw}`;
+          console.log('[Sequential Meter Validation] sending to Lotus LLM with contract info:', contractInfo.replace('\n', ' '));
+          
+          // Use Lotus LLM API for meter validation
+          const LOTUS_LLM_URL = 'https://api-cpxis.lotuss.com/llm/v1/chat/completions';
+          const LOTUS_API_KEY = 'accounting.lotuss.F51DAF28FD6422DDF3CD864F833CC';
+          
+          const response = await axios.post(LOTUS_LLM_URL, {
+            model: 'default',
+            messages: [
+              {
+                role: 'user',
+                content: meterPrompt
+              }
+            ],
+            temperature: 0.1,
+            max_tokens: 2000
+          }, {
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${LOTUS_API_KEY}`
+            },
+            timeout: 0 // No timeout - wait indefinitely
+          });
+
+          // Handle new API response format where content might be in reasoning_content
+          const messageContent = response.data.choices[0].message.content;
+          const reasoningContent = response.data.choices[0].message.reasoning_content;
+          const meterResponse = (messageContent || reasoningContent).trim();
+          console.log('[Sequential Meter Validation] Lotus LLM response:', meterResponse);
+
+          try {
+            // Use stripThinkTags to properly handle <think> tags and extract JSON
+            const cleanedResponse = stripThinkTags(meterResponse);
+            meterValidation = JSON.parse(cleanedResponse);
+            console.log('[Sequential Meter Validation] parsed successfully');
+          } catch (parseErr) {
+            console.error('[Sequential Meter Validation] parse error:', parseErr.message);
+            meterValidation = [{ field: 'Meter Check', value: 'Error', valid: false, reason: 'Failed to parse meter validation response' }];
+          }
+        }
+
+      } catch (meterErr) {
+        console.error('[Sequential Utility] Error during meter scraping:', meterErr.message);
+        meterValidation = [{ field: 'Meter Check', value: 'Error', valid: false, reason: `Meter scraping failed: ${meterErr.message}` }];
+      }
+    } else {
+      console.log('[Sequential Utility] Skipping meter check - Include Utility not Yes or not LO contract');
+    }
+    
+    // Save to Firebase (including meter validation if available)
+    const contractId = contractNumber.replace(/\//g, '_');
+    const saveData = {
+      timestamp: new Date(),
+      contract_number: contractId,
+      web_extracted: scrapedText,
+      lotus_output: JSON.stringify(extractedData, null, 2),
+      processing_method: 'sequential',
+      popup_url: popup.url()
+    };
+    
+    if (meterValidation) {
+      saveData.meter_validation = JSON.stringify(meterValidation, null, 2);
+      saveData.utility_raw = utilityRaw;
+    }
+    
+    await db.collection('web_scrape_results').doc(contractId).set(saveData, { merge: true });
+
+    console.log('[Sequential Web] Processing complete');
+    const responseData = {
+      success: true,
+      raw: scrapedText,
+      lotusOutput: JSON.stringify(extractedData, null, 2),
+      extractedData: extractedData,
+      processingMethod: 'sequential',
+      popupUrl: popup.url()
+    };
+    
+    if (meterValidation) {
+      responseData.meterValidation = meterValidation;
+      responseData.utilityRaw = utilityRaw;
+    }
+    
+    res.json(responseData);
+
+  } catch (err) {
+    console.error('[Sequential Web] Error:', err);
+    
+    // Fallback to legacy processing
+    console.log('[Sequential Web] Falling back to legacy processing');
+    try {
+      const fallbackRes = await axios.post('http://localhost:5001/api/scrape-url', {
+        systemType,
+        promptKey: contractType === 'permanent_fixed' ? 'LOI_permanent_fixed_fields' : 'LOI_service_express_fields',
+        contractNumber,
+      });
+      
+      return res.json({
+        ...fallbackRes.data,
+        processingMethod: 'legacy_fallback'
+      });
+    } catch (fallbackErr) {
+      console.error('[Sequential Web] Fallback also failed:', fallbackErr);
+      return res.status(500).json({
+        success: false,
+        message: 'Both sequential and legacy web processing failed',
+        error: err.message
+      });
+    }
+  }
+});
+
+// --- TEST endpoint ---
+app.get('/api/test', (req, res) => {
+  console.log('🧪 Test endpoint hit!');
+  res.json({ message: 'Server is working!', database: DATABASE_TYPE });
+});
+
+// --- LOGIN endpoint ---
+app.post('/api/login', async (req, res) => {
+  console.log('🔐 Login endpoint hit!', req.body);
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Missing email or password' });
+  }
+
+  try {
+    if (DATABASE_TYPE === 'mongodb') {
+      // MongoDB login implementation
+      console.log(`🔐 [MongoDB Login] Attempting login for: ${email}`);
+      
+      const user = await User.findOne({ email: email.toLowerCase() });
+      if (!user) {
+        console.log(`❌ [MongoDB Login] No user found with email: ${email}`);
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+
+      if (!user.isActive) {
+        console.log(`❌ [MongoDB Login] User is inactive: ${email}`);
+        return res.status(401).json({ error: 'Account is inactive' });
+      }
+
+      // Check if password is hashed or plaintext
+      let passwordMatch = false;
+      if (user.password.startsWith('$2')) {
+        // Hashed password - use bcrypt
+        passwordMatch = await bcryptjs.compare(password, user.password);
+      } else {
+        // Plain text password - direct comparison (for migration/testing)
+        passwordMatch = user.password === password;
+      }
+
+      if (!passwordMatch) {
+        console.log(`❌ [MongoDB Login] Invalid password for: ${email}`);
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+
+      console.log(`✅ [MongoDB Login] Successful login for: ${email}, role: ${user.role}`);
+      return res.json({
+        email: user.email,
+        role: user.role,
+        username: user.username
+      });
+      
+    } else {
+      // Firebase/Firestore login implementation
+      console.log(`🔐 [Firebase Login] Attempting login for: ${email}`);
+      
+      const snapshot = await db
+        .collection('user_login')
+        .where('email', '==', email)
+        .limit(1)
+        .get();
+
+      if (snapshot.empty) {
+        console.log(`❌ [Firebase Login] No user found with email: ${email}`);
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+
+      const userDoc = snapshot.docs[0];
+      const data = userDoc.data();
+
+      // Simple plaintext comparison (since your example stores password="123456")
+      if (data.password !== password) {
+        console.log(`❌ [Firebase Login] Invalid password for: ${email}`);
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+
+      console.log(`✅ [Firebase Login] Successful login for: ${email}, role: ${data.role}`);
+      return res.json({
+        email: data.email,
+        role: data.role,
+      });
+    }
+  } catch (err) {
+    console.error('[LOGIN ERROR]', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ===== Excel Sheet Upload - Get Sheet Names =====
+app.post('/api/get-sheet-names', upload.single('file'), async (req, res) => {
+  try {
+    const file = req.file;
+    if (!file) return res.status(400).json({ message: 'No file uploaded' });
+
+    const filePath = path.join(__dirname, file.path);
+    const workbook = xlsx.readFile(filePath);
+    const sheetNames = workbook.SheetNames;
+    const tempFileName = `${uuidv4()}_${file.originalname}`;
+    const tempDest = path.join(__dirname, 'uploads', tempFileName);
+
+    fs.renameSync(filePath, tempDest);
+    res.json({ sheetNames, tempFileName });
+  } catch (err) {
+    console.error('Error getting sheet names:', err);
+    res.status(500).json({ message: 'Failed to get sheet names', error: err.message });
+  }
+});
+
+// ===== Excel Sheet Processor =====
+app.post('/api/process-sheet', async (req, res) => {
+  try {
+    const { fileName, sheetName, promptKey = 'LOI_permanent_fixed_fields' } = req.body;
+    const filePath = path.join(__dirname, 'uploads', fileName);
+
+    const promptFilePath = path.join(__dirname, 'prompts', `${promptKey}.txt`);
+    if (!fs.existsSync(promptFilePath)) {
+      return res.status(400).json({ message: `Prompt template '${promptKey}' not found.` });
+    }
+    const promptTemplate = fs.readFileSync(promptFilePath, 'utf8');
+
+    const workbook = xlsx.readFile(filePath);
+    if (!workbook.Sheets[sheetName]) {
+      return res.status(400).json({ message: `Sheet "${sheetName}" not found` });
+    }
+
+    const jsonData = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
+    const jsonString = JSON.stringify(jsonData, null, 2);
+
+    const finalPrompt = `${promptTemplate}\n\nData:\n${jsonString}`;
+    const response = await axios.post(LOTUS_LLM_URL, {
+      model: 'default',
+      messages: [
+        { role: 'system', content: 'You are a helpful assistant that extracts information from documents and returns only valid JSON.' },
+        { role: 'user', content: finalPrompt }
+      ],
+      temperature: 0.1,
+      max_tokens: 5000,
+      chat_template_kwargs: { enable_thinking: false } // Enable thinking for better reasoning
+    }, {
+      headers: {
+        'Authorization': `Bearer ${LOTUS_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 30000
+    });
+    const lotusText = stripThinkTags(response.data.choices[0].message.content);
+
+    // Attempt to extract Contract Number
+    let contractId = 'unknown_excel_id';
+    try {
+      const match = lotusText.match(/"Contract Number"\s*:\s*"([^"]+)"/);
+      if (match) contractId = match[1].replace(/\//g, '_');
+      console.log('[📄 Excel Contract ID]', contractId);
+    } catch (err) {
+      console.warn('[⚠️ Could not extract contract number from Excel Lotus]', err.message);
+    }
+
+    await db.collection('excel_results').doc(contractId).set({
+      timestamp: new Date(),
+      raw_data: jsonString,
+      lotus_response: lotusText,
+      prompt_key: promptKey,
+    });
+
+    fs.unlinkSync(filePath);
+
+    res.json({ success: true, table: jsonData, lotusOutput: lotusText });
+  } catch (err) {
+    console.error('Error in /api/process-sheet:', err);
+    res.status(500).json({ message: 'Error processing sheet', error: err.message });
+  }
+});
+
+// ===== Web Scraping =====
+// ===== Web Scraping (Simplicity Internal Navigation) =====
+// ... (existing imports & setup code remain unchanged)
+
+app.post('/api/scrape-url', async (req, res) => {
+  console.log('[Simplicity] Incoming request to /api/scrape-url');
+  console.log('[Request Body]', req.body);
+
+  try {
+    const { systemType = 'simplicity', contractType = 'permanent_fixed', contractNumber } = req.body;
+
+    if (!contractNumber) {
+      console.error('[❌ No contract number provided]');
+      return res.status(400).json({ message: 'Contract number is required' });
+    }
+
+    if (!browserSessions.has(systemType)) {
+      console.error('[❌ Not logged in for system type]', systemType);
+      return res.status(401).json({ message: 'Not logged in for Simplicity' });
+    }
+
+    const session = browserSessions.get(systemType);
+    if (!session || !session.browser || !session.page) {
+      console.error('[❌ Invalid browser session]');
+      return res.status(500).json({ message: 'Invalid browser session. Please login again.' });
+    }
+    
+    const { browser, page } = session;
+    const isLeaseOffer = contractNumber.includes('LO');
+    const submenuText = isLeaseOffer ? 'Lease Offer' : 'Lease Renewal';
+
+    console.log(`[Simplicity] Navigating Lease > ${submenuText}...`);
+    await page.waitForSelector('#menu_MenuLiteralDiv > ul > li:nth-child(10) > a', { timeout: 10000 });
+    await page.click('#menu_MenuLiteralDiv > ul > li:nth-child(10) > a');
+    await page.mouse.click(5, 5);
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    // Use robust retry mechanism for clicking submenu
+    await robustClickSubmenu(page, submenuText, contractNumber);
+
+    console.log(`✅ ${submenuText} clicked`);
+    await new Promise(resolve => setTimeout(resolve, 10000));
+
+    let scrapedText = '';
+
+    if (contractNumber) {
+      console.log('[Simplicity] Searching for contract number:', contractNumber);
+      await page.waitForSelector('iframe[name="frameBottom"]', { timeout: 70000 });
+      const iframeHandle = await page.$('iframe[name="frameBottom"]');
+      const frame = await iframeHandle.contentFrame();
+      if (!frame) {
+        console.error('❌ Could not access iframe content');
+        throw new Error('❌ Could not access iframe content');
+      }
+
+      await frame.waitForSelector('#panel_SimpleSearch_c1', { visible: true, timeout: 70000 });
+      console.log('[Simplicity] Typing and submitting contract number...');
+      await frame.evaluate((contract) => {
+        const input = document.querySelector('#panel_SimpleSearch_c1');
+        input.value = contract;
+        input.focus();
+      }, contractNumber);
+
+      // <<< REPLACED CLICK TECHNIQUE >>>
+      console.log('[Simplicity] Clicking search <a> button...');
+      await frame.waitForSelector('a#panel_buttonSearch_bt', { visible: true, timeout: 10000 });
+      await frame.evaluate(() => {
+        const btn = document.querySelector('a#panel_buttonSearch_bt');
+        if (btn) btn.click();
+      });
+      await new Promise(resolve => setTimeout(resolve, 15000));
+
+      console.log('[Simplicity] Clicking view icon...');
+      const viewButton = await frame.$('input[src*="view-black-16.png"]');
+      if (!viewButton) {
+        console.error('❌ View icon not found');
+        throw new Error('❌ View icon not found');
+      }
+      await viewButton.click();
+
+      const popupUrlMatch = contractNumber.includes('LO')
+      ? 'leaseoffer/edit.aspx'
+      : 'leaserenewal/edit.aspx';
+
+      // Clean up leftover popups
+      const oldPages = await browser.pages();
+      for (const p of oldPages) {
+        const url = p.url();
+        if (url.includes('leaseoffer/edit.aspx') || url.includes('leaserenewal/edit.aspx')) {
+          if (p !== page) await p.close();
+        }
+      }
+
+      // Now wait for the new popup
+      let popup;
+      for (let i = 0; i < 15; i++) {
+        console.log(`[Simplicity] Popup search attempt ${i + 1}/15, looking for URL containing: ${popupUrlMatch}`);
+        const pages = await browser.pages();
+        console.log(`[Simplicity] Current pages (${pages.length} total):`, pages.map(p => p.url()));
+        popup = pages.find(p => p.url().includes(popupUrlMatch) && p !== page);
+        if (popup) {
+          console.log(`[Simplicity] ✅ Popup found: ${popup.url()}`);
+          break;
+        }
+        console.log(`[Simplicity] ⏳ Popup not found yet, waiting 2 seconds...`);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+    
+    if (!popup) {
+      console.error('❌ Popup window not found for:', popupUrlMatch);
+      console.log('[Simplicity] 🔍 All current pages at timeout:');
+      const allPages = await browser.pages();
+      allPages.forEach((p, index) => {
+        console.log(`  Page ${index + 1}: ${p.url()}`);
+      });
+      
+      // Try to find any new page that appeared after the main page
+      const possiblePopup = allPages.find(p => p !== page && !p.url().includes('apptop.aspx') && !p.url().includes('about:blank'));
+      if (possiblePopup) {
+        console.log(`[Simplicity] 🔍 Found possible popup with different URL: ${possiblePopup.url()}`);
+        popup = possiblePopup;
+      } else {
+        throw new Error('❌ Popup window not found');
+      }
+    }
+
+
+
+
+      console.log('[Simplicity] Bringing popup to front...');
+      await popup.bringToFront();
+      
+      console.log('[Simplicity] Waiting for popup content to load...');
+      await popup.waitForFunction(() => document.body && document.body.innerText.trim().length > 0, { timeout: 0 });
+
+      console.log('[Simplicity] Waiting for popup navigation to complete...');
+      try {
+        await Promise.race([
+          popup.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }),
+          new Promise(resolve => setTimeout(resolve, 10000))
+        ]);
+        console.log('[Simplicity] ✅ Navigation complete or timeout reached');
+      } catch (err) {
+        console.warn('[⚠️ popup.waitForNavigation] Error or already loaded:', err.message);
+      }
+
+      // build your TYPE value however you need, then…
+      const popupUrl = popup.url();
+      console.log('[Simplicity] Final popup URL with params:', popupUrl);
+      
+      console.log('[Simplicity] Expanding all collapsible sections...');
+      const collapsibleIds = [
+        '#panelMonthlyCharge_label',
+        '#panelOtherMonthlyCharge_label',
+        '#panelGTO_label',
+        '#LeaseMeterTypessArea_label',
+        '#panelSecurityDeposit_label',
+        '#panelOneTimeCharge_label'
+      ];
+
+      console.log('[Simplicity] Waiting 10 seconds for page to fully load...');
+      await new Promise(resolve => setTimeout(resolve, 10000));
+      
+      console.log('[Simplicity] Starting to expand collapsible sections...');
+      for (let i = 0; i < collapsibleIds.length; i++) {
+        const selector = collapsibleIds[i];
+        console.log(`[Simplicity] Processing collapsible ${i + 1}/${collapsibleIds.length}: ${selector}`);
+        try {
+          const element = await popup.$(selector);
+          if (!element) {
+            console.log(`[Simplicity] ⚠️ Element not found: ${selector}`);
+            continue;
+          }
+          
+          const isCollapsed = await popup.$eval(selector, el => el.classList.contains('collapsible-panel-collapsed'));
+          console.log(`[Simplicity] ${selector} collapsed status: ${isCollapsed}`);
+          
+          if (isCollapsed) {
+            console.log(`[Simplicity] Clicking to expand: ${selector}`);
+            await popup.click(selector);
+            console.log(`[Simplicity] ✅ Expanded: ${selector}`);
+            console.log(`[Simplicity] Waiting 7 seconds for expansion to complete...`);
+            await new Promise(resolve => setTimeout(resolve, 3000));
+          } else {
+            console.log(`[Simplicity] Already expanded: ${selector}`);
+          }
+        } catch (err) {
+          console.warn(`[Simplicity] ⚠️ Could not expand ${selector}:`, err.message);
+        }
+      }
+      
+      console.log('[Simplicity] Finished expanding all collapsible sections');
+
+      scrapedText = await popup.evaluate(() => document.body.innerText);
+      console.log('[Simplicity] Scraped content:', scrapedText);
+
+      // Use sequential processing for web scraping instead of monolithic approach
+      console.log('[🔄 Using sequential processing for web extraction to avoid 504 errors]');
+      
+      let lotusText;
+      try {
+        // Extract contract number from scraped text if not provided
+        let detectedContractNumber = contractNumber;
+        if (!detectedContractNumber && scrapedText) {
+          const contractMatch = scrapedText.match(/\d{4}_L[OR]\d{4}_\d{5}/);
+          detectedContractNumber = contractMatch ? contractMatch[0] : null;
+        }
+        
+        // Use the cleaner sequential processor for web field extraction
+        const extractedFields = await sequentialProcessor.processSequential(scrapedText, contractType, 'web', detectedContractNumber);
+        lotusText = JSON.stringify(extractedFields, null, 2);
+        console.log(`[✅ Sequential web extraction completed] ${Object.keys(extractedFields).length} fields extracted`);
+      } catch (error) {
+        console.error('[❌ Sequential web extraction failed]', error.message);
+        return res.status(500).json({ message: 'Web extraction failed', error: error.message });
+      }
+
+      // Use the passed contractNumber (from autoProcessor) instead of extracting from web data
+      let contractId = contractNumber || 'unknown_scrape_id';
+      let leaseType = '';
+      let workflowStatus = '';
+      let tenantType = '';
+
+      try {
+        // Don't override contractId from web extraction - use the one passed from autoProcessor
+        // const match = lotusText.match(/"Contract Number"\s*:\s*"([^"]+)"/);
+        // if (match) contractId = match[1].replace(/\//g, '_');
+
+        const leaseTypeMatch = lotusText.match(/"Lease Type"\s*:\s*"([^"]+)"/);
+        if (leaseTypeMatch) leaseType = leaseTypeMatch[1];
+
+        const workflowStatusMatch = lotusText.match(/"Workflow status"\s*:\s*"([^"]+)"/);
+        if (workflowStatusMatch) workflowStatus = workflowStatusMatch[1];
+
+        const tenantTypeMatch = lotusText.match(/"Tenant Type"\s*:\s*"([^"]+)"/);
+        if (tenantTypeMatch) tenantType = tenantTypeMatch[1];
+
+        console.log('[📄 Scrape Contract ID]', contractId, '[Lease Type]', leaseType, '[Workflow Status]', workflowStatus);
+      } catch (err) {
+        console.warn('[⚠️ Could not extract fields from Scrape Gemini]', err.message);
+      }
+
+      await db.collection('compare_result').doc(contractId).set({
+        timestamp: new Date(),
+        contract_number: contractId,
+        web_extracted: scrapedText,
+        lotus_output: lotusText, // ✅ ADD THIS
+        lease_type: leaseType,
+        workflow_status: workflowStatus,
+        tenant_type: tenantType,
+      }, { merge: true });
+
+      console.log(`[🔥 Firebase] Document saved to 'compare_result': ${contractId}`);
+
+      res.json({ 
+        success: true,
+        raw: scrapedText,
+        lotusOutput: lotusText,
+        popupUrl
+      });
+    }
+  } catch (err) {
+    console.error('[Simplicity scrape-url error]', err);
+    res.status(500).json({ message: 'Error during Simplicity navigation', error: err.message });
+  }
+});
+
+
+
+app.post('/api/open-popup-tab', async (req, res) => {
+  const { systemType = 'simplicity', contractNumber } = req.body;
+  console.log('[🗭 Request] /api/open-popup-tab', { systemType, contractNumber });
+
+  if (!contractNumber) return res.status(400).json({ message: 'Contract number required.' });
+
+  try {
+    let browser, page;
+
+    // --- LOGIN STEP (two-step) ---
+    if (!browserSessions.has(systemType)) {
+      console.log('[🔑 Not logged in — triggering two-step login]');
+
+      const puppeteer = await import('puppeteer');
+      browser = await puppeteer.launch({
+        headless: false,
+        defaultViewport: null,
+        args: ['--start-fullscreen'],
+        protocolTimeout: 300000 // 5 minutes timeout
+      });
+      page = await browser.newPage();
+      page.setDefaultTimeout(0); // Disable all timeouts
+      page.setDefaultNavigationTimeout(0); // Disable navigation timeouts
+
+      // 1) Load landing
+      console.log('[Login] Navigating to apptop.aspx');
+      await page.goto('https://mall-management.lotuss.com/Simplicity/apptop.aspx', {
+        waitUntil: 'networkidle2',
+      });
+
+      // 2) Click “Click to go to the login page”
+      console.log('[Login] Waiting for Go-to-login button');
+      await page.waitForSelector('#lblToLoginPage', { timeout: 20000 });
+      console.log('[Login] Clicking Go-to-login');
+      await page.click('#lblToLoginPage');
+      await new Promise(r => setTimeout(r, 5000));
+
+      // 3) Username + Continue
+      console.log('[Login] Waiting for username field');
+      await page.waitForSelector('input#username', { timeout: 20000 });
+      console.log('[Login] Typing username');
+      await page.type('input#username', 'john.pattanakarn@lotuss.com', { delay: 50 });
+      const cont1 = '#root > div > div > div.sc-dymIpo.izSiFn > div.withConditionalBorder.sc-bnXvFD.izlagV > div.sc-jzgbtB.bIuYUf > form > div > div:nth-child(3) > div > button';
+      console.log('[Login] Waiting for Continue #1');
+      await page.waitForSelector(cont1, { timeout: 20000 });
+      console.log('[Login] Clicking Continue #1');
+      await page.click(cont1);
+      await new Promise(r => setTimeout(r, 5000));
+
+      // 4) Password + Continue
+      console.log('[Login] Waiting for password field');
+      await page.waitForSelector('input#password', { timeout: 20000 });
+      console.log('[Login] Typing password');
+      await page.type('input#password', 'Gofresh@0725-19', { delay: 50 });
+      const cont2 = '#root > div > div > div.sc-dymIpo.izSiFn > div.withConditionalBorder.sc-bnXvFD.izlagV > div.sc-jzgbtB.bIuYUf > form > div > div:nth-child(4) > div > button';
+      console.log('[Login] Waiting for Continue #2');
+      await page.waitForSelector(cont2, { timeout: 20000 });
+      console.log('[Login] Clicking Continue #2');
+      await page.click(cont2);
+
+      // 5) Wait for post-login
+      await Promise.all([
+        page.waitForNavigation({ waitUntil: 'networkidle2' })
+      ]).catch(() => {});
+      await new Promise(r => setTimeout(r, 5000));
+
+      // 6) Verify
+      const html = await page.content();
+      if (html.includes('Invalid login')) {
+        console.error('[Login] Invalid credentials');
+        await browser.close();
+        return res.status(401).json({ success: false, message: 'Invalid credentials.' });
+      }
+
+      browserSessions.set(systemType, { browser, page });
+      console.log('[✅ Login successful]');
+    } else {
+      ({ browser, page } = browserSessions.get(systemType));
+    }
+
+    // --- NAVIGATION & POPUP (unchanged) ---
+    console.log('[📂 Navigating to Lease tab]');
+    await page.waitForSelector('#menu_MenuLiteralDiv > ul > li:nth-child(10) > a', { timeout: 10000 });
+    await page.click('#menu_MenuLiteralDiv > ul > li:nth-child(10) > a');
+    await new Promise(r => setTimeout(r, 500));
+
+    await page.evaluate(() => {
+      const el = [...document.querySelectorAll('a')].find(a => a.textContent.trim() === 'Lease');
+      if (el) el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    });
+    await new Promise(r => setTimeout(r, 2000));
+
+    const menuToClick = contractNumber.includes('LR') ? 'Lease Renewal' : 'Lease Offer';
+    
+    // Use robust retry mechanism for clicking submenu
+    await robustClickSubmenu(page, menuToClick, contractNumber);
+    console.log(`[📎 Clicked submenu: ${menuToClick}]`);
+    await new Promise(r => setTimeout(r, menuToClick === 'Lease Renewal' ? 8000 : 5000));
+
+    const iframeHandle = await robustWaitForElement(page, 'iframe[name="frameBottom"]', 70000);
+    const frame = await iframeHandle.contentFrame();
+    await frame.waitForSelector('#panel_SimpleSearch_c1', { visible: true });
+    await frame.evaluate((cn) => {
+      const input = document.querySelector('#panel_SimpleSearch_c1');
+      input.value = cn; input.focus();
+    }, contractNumber);
+
+    await frame.waitForSelector('a#panel_buttonSearch_bt', { visible: true });
+    await frame.evaluate(() => document.querySelector('a#panel_buttonSearch_bt')?.click());
+    await new Promise(r => setTimeout(r, 10000));
+
+    const viewBtn = await frame.$('input[src*="view-black-16.png"]');
+    if (!viewBtn) throw new Error('❌ View icon not found');
+    await viewBtn.click();
+
+    console.log('[📝 Waiting for popup tab...]');
+    let popup;
+    for (let i = 0; i < 10; i++) {
+      const pages = await browser.pages();
+      popup = pages.find(p => p.url().includes('leaseoffer/edit.aspx') && p !== page);
+      if (popup) break;
+      await new Promise(r => setTimeout(r, 1000));
+    }
+
+    if (popup) {
+      await popup.bringToFront();
+      console.log('[✅ Popup tab opened]');
+    } else {
+      console.warn('[⚠️ Popup tab not detected]');
+    }
+
+    return res.json({ success: true, message: `Popup triggered for ${menuToClick}.` });
+
+  } catch (err) {
+    console.error('[❌ /api/open-popup-tab error]', err);
+    return res.status(500).json({ message: err.message });
+  }
+});
+
+
+// end of scrape logic
+app.post('/api/scrape-login', async (req, res) => {
+  const { systemType, username, password } = req.body;
+
+  // No‐op for “others”
+  if (!systemType || systemType === 'others') {
+    return res.status(200).json({ success: true, message: 'No login required for Others.' });
+  }
+
+  try {
+    let browser, page;
+
+    // 1) Reuse session if we already have one
+    if (browserSessions.has(systemType)) {
+      ({ browser, page } = browserSessions.get(systemType));
+    } else {
+      // 2) Launch fresh browser + page
+      browser = await puppeteer.launch({ 
+        headless: false,
+        protocolTimeout: 300000 // 5 minutes timeout
+      });
+      page = await browser.newPage();
+      page.setDefaultTimeout(0); // Disable all timeouts
+      page.setDefaultNavigationTimeout(0); // Disable navigation timeouts
+
+      // 3) Go to the Simplicity landing page
+      await page.goto(
+        'https://mall-management.lotuss.com/Simplicity/apptop.aspx',
+        { waitUntil: 'networkidle2' }
+      );
+
+      // 4) Click “Click to go to the login page” + wait for it to load
+      await page.waitForSelector('#lblToLoginPage', { visible: true, timeout: 20000 });
+      await Promise.all([
+        page.click('#lblToLoginPage'),
+        page.waitForNavigation({ waitUntil: 'networkidle2' })
+      ]);
+
+      // 5) Enter username and Continue
+      await page.waitForSelector('input#username', { visible: true, timeout: 20000 });
+      await page.type('input#username', username, { delay: 50 });
+
+      const continueSel1 =
+        '#root > div > div > div.sc-dymIpo.izSiFn > div.withConditionalBorder.sc-bnXvFD.izlagV ' +
+        '> div.sc-jzgbtB.bIuYUf > form > div > div:nth-child(3) > div > button';
+      await page.waitForSelector(continueSel1, { visible: true, timeout: 20000 });
+      await page.click(continueSel1);
+
+      // 6) Enter password and Continue
+      await page.waitForSelector('input#password', { visible: true, timeout: 20000 });
+      await page.type('input#password', password, { delay: 50 });
+
+      const continueSel2 =
+        '#root > div > div > div.sc-dymIpo.izSiFn > div.withConditionalBorder.sc-bnXvFD.izlagV ' +
+        '> div.sc-jzgbtB.bIuYUf > form > div > div:nth-child(4) > div > button';
+      await page.waitForSelector(continueSel2, { visible: true, timeout: 20000 });
+      await Promise.all([
+        page.click(continueSel2),
+        page.waitForNavigation({ waitUntil: 'networkidle2' }).catch(() => {})
+      ]);
+
+      // small extra buffer
+      await new Promise(r => setTimeout(r, 10000));
+
+      // 7) Verify login succeeded
+      const html = await page.content();
+      if (html.includes('Invalid login')) {
+        await browser.close();
+        return res.status(401).json({ success: false, message: 'Invalid credentials' });
+      }
+
+      // 8) Store for reuse
+      browserSessions.set(systemType, { browser, page });
+    }
+
+    console.log(`[LOGIN] Simplicity login successful for ${username}`);
+    return res.json({ success: true });
+
+  } catch (err) {
+    console.error('[SCRAPE-LOGIN Error]', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Login failed',
+      error: err.message
+    });
+  }
+});
+
+
+// ===== Get Available Prompt Templates (.txt files) =====
+app.get('/api/prompts', (req, res) => {
+  const promptsDir = path.join(__dirname, 'prompts'); // assume ./prompts holds .txt files
+  fs.readdir(promptsDir, (err, files) => {
+    if (err) {
+      console.error('Failed to read prompt directory:', err);
+      return res.status(500).json({ message: 'Failed to read prompt templates' });
+    }
+    const promptKeys = files.filter(file => file.endsWith('.txt')).map(f => f.replace('.txt', ''));
+    res.json({ promptKeys });
+  });
+});
+
+// === Endpoint: Fetch latest lotus_response for selected sources ===
+app.post('/api/fetch-latest-json', async (req, res) => {
+  const { sources } = req.body;
+  const collectionMap = {
+    pdf: 'vision_results',
+    web: 'scrape_results',  // Ensure that `scrape_results` is being used for the 'web' source
+    excel: 'excel_results',
+  };
+
+  try {
+    const results = {};
+
+    for (const src of sources) {
+      const collectionName = collectionMap[src];
+      if (!collectionName) continue;
+
+      const snapshot = await db
+        .collection(collectionName)
+        .orderBy('timestamp', 'desc')
+        .limit(1)
+        .get();
+
+      if (!snapshot.empty) {
+        const doc = snapshot.docs[0].data();
+        console.log(`[Firebase doc for ${src}]`, doc);  // Log the full doc to check the structure
+
+        // Check if lotus_response exists
+        let lotusResponse = doc.lotus_response || '';  // Default to an empty string if missing
+        if (!lotusResponse) {
+          console.warn(`[Firebase] No lotus_response found for source: ${src}`);
+        }
+
+        // Clean and trim the response
+        let cleaned = lotusResponse.trim();
+        cleaned = cleaned.replace(/^```json\s*/i, '').replace(/```$/, '').trim();
+        results[src] = cleaned;
+        console.log(`[Firebase Cleaned] ${src}: ${cleaned}`);
+      } else {
+        console.warn(`[Firebase] No document found for source: ${src}`);
+        results[src] = null;
+      }
+    }
+
+    res.json({ success: true, results });
+  } catch (err) {
+    console.error('Error fetching latest JSON:', err);
+    res.status(500).json({ message: 'Failed to fetch JSON from Firebase', error: err.message });
+  }
+});
+
+// ===== FALLBACK COMPARISON FIELDS FUNCTION =====
+function getFallbackComparisonFields(category, contractType = 'permanent_fixed') {
+  // Base fields for all contract types
+  const baseBasicFields = [
+    { field: "Building Name", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+    { field: "Brand Name", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+    { field: "Customer Name", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+    { field: "Customer Address", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+    { field: "Unit ID", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+    { field: "Space (NLA)", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+    { field: "Tenant Type", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+    { field: "Proposed lease commencement date", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+    { field: "Proposed lease expiry date", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+    { field: "Billing Frequency", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" }
+  ];
+  
+  // Add contract-specific fields
+  let basicFields = [...baseBasicFields];
+  if (contractType === 'permanent_fixed') {
+    basicFields.unshift({ field: "อยู่กองทรัสต์หรือไม่", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" });
+  }
+  
+  const fallbackData = {
+    basic: basicFields,
+    basic_fields: basicFields,
+    basic_fields_part2: [
+      { field: "Building ID", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Unit ID", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" }
+    ],
+    lease_terms: [
+      { field: "Lease Type", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Monthly charge", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 1 : Contract Start date", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 1 : Contract End date", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 1 : Charge Type", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 1 : Monthly Amount of rent", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 1 : Monthly Amount of service", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 2 : Contract Start date", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 2 : Contract End date", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 2 : Charge Type", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 2 : Monthly Amount of rent", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 2 : Monthly Amount of service", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 3 : Contract Start date", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 3 : Contract End date", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 3 : Charge Type", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 3 : Monthly Amount of rent", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 3 : Monthly Amount of service", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Total Rent Deposits", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Total Service Deposits", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" }
+    ],
+    lease_terms_deposits: [
+      { field: "Total Rent Deposits", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Total Service Deposits", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Deposits Amount", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" }
+    ],
+    lease_terms_year1: [
+      { field: "Year 1 : Contract Start date", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 1 : Contract End date", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 1 : Charge Type", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 1 : Monthly Amount of rent", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 1 : Monthly Amount of service", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" }
+    ],
+    lease_terms_year2: [
+      { field: "Year 2 : Contract Start date", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 2 : Contract End date", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 2 : Charge Type", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 2 : Monthly Amount of rent", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Year 2 : Monthly Amount of service", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" }
+    ],
+    service_charges: [
+      { field: "Other service charge (in the renting space)", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Other service charge (in the renting space) Charge description", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Other service charge (in the renting space) start date", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Other service charge (in the renting space) end date", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Other service charge (Common area)", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Other service charge (Common area) Charge description", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Other service charge (Common area) start date", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Other service charge (Common area) end date", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" }
+    ],
+    tax_deposits: [
+      { field: "Lease property tax rate", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Deposits Amount", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" }
+    ],
+    utilities: [
+      { field: "Include Utility", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Utilities charge (water)", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Utilities charge (Electricity)", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" },
+      { field: "Utilities charge (cooking gas)", pdf: "Processing timeout", web: "Processing timeout", match: false, reason: "Category timed out - unable to compare" }
+    ]
+  };
+  
+  return fallbackData[category] || [{ field: `${category}_fallback`, pdf: "Unknown category", web: "Unknown category", match: false, reason: "Unknown category processed" }];
+}
+
+// === Existing Gemini Compare Endpoint ===
+app.post('/api/lotus-compare', async (req, res) => {
+  console.log('[👁️ HIT /api/lotus-compare]')
+  const { formattedSources, promptKey = 'LOI_permanent_fixed_fields', contractNumber, contractType: requestContractType } = req.body;
+
+  try {
+    // 🔍 Use contractType from request body if provided, otherwise derive from promptKey
+    const contractType = requestContractType || (promptKey.includes('service_express') ? 'service_express' : 'permanent_fixed');
+    console.log(`[🔍 Contract type resolved] RequestType: ${requestContractType}, PromptKey: ${promptKey}, Final: ${contractType}`);
+    
+    // Use PromptManager to get comparison prompts
+    const promptManager = new PromptManager();
+    
+    // Initialize sequential processor for improved retry logic
+    const sequentialProcessor = new SequentialProcessor();
+    const comparisonCategories = ['basic', 'lease_terms_year1', 'lease_terms_year2', 'lease_terms_deposits', 'service_charges', 'utilities', 'tax_deposits'];
+    
+    // Prepare sources string once
+    const sourcesString = Object.entries(formattedSources)
+      .map(([key, json]) => `${key.toUpperCase()}: ${JSON.stringify(json, null, 2)}`)
+      .join('\n\n');
+    
+    // Process each category separately to avoid overload
+    const allResults = [];
+    console.log('[🔄 Using chunked Lotus LLM comparison]');
+    
+    for (const category of comparisonCategories) {
+      try {
+        console.log(`[📊 Processing category: ${category}]`);
+        const categoryPrompt = promptManager.createComparisonPrompt(category, contractType, contractNumber);
+        const finalPrompt = `${categoryPrompt}\n\nSources:\n${sourcesString}`;
+        
+        // Log the prompt for basic category (where LR rule should apply)
+        if (category === 'basic') {
+          console.log(`[🔍 BASIC CATEGORY PROMPT PREVIEW]:`);
+          console.log(`Contract Number in prompt: ${contractNumber}`);
+          console.log(`Prompt preview (first 500 chars): ${finalPrompt.substring(0, 500)}...`);
+          if (finalPrompt.includes('LR CONTRACT RULE')) {
+            console.log(`[✅ LR CONTRACT RULE found in basic category prompt]`);
+          } else {
+            console.log(`[❌ LR CONTRACT RULE NOT found in basic category prompt]`);
+          }
+        }
+        
+        // Use sequential processor with improved retry logic
+        const messages = [
+          {
+            role: 'system',
+            content: 'You are a contract comparison assistant. Return ONLY a valid JSON array without any markdown formatting, code blocks, or additional text. Do not use ```json or ``` markers.'
+          },
+          {
+            role: 'user',
+            content: finalPrompt
+          }
+        ];
+        
+        const options = {
+          temperature: 0.1,
+          max_tokens: 4000,
+          timeout: 240000 // 4 minutes timeout
+        };
+        
+        const categoryResult = await sequentialProcessor.callLotusWithCustomRetry(messages, options, 6, false);
+        console.log(`[✅ Category ${category} processed successfully]`);
+        console.log(`[🔍 ${category} raw response length:`, categoryResult.length);
+        console.log(`[🔍 ${category} response preview:`, categoryResult.substring(0, 500) + '...');
+        
+        // Clean the response directly (thinking mode disabled)
+        let cleanedResult = categoryResult.trim();
+        console.log(`[🧹 ${category} after cleaning length:`, cleanedResult.length);
+        
+        // Remove markdown code blocks if present
+        if (cleanedResult.includes('```json')) {
+          cleanedResult = cleanedResult.replace(/```json\s*/gi, '').replace(/```/g, '');
+        } else if (cleanedResult.includes('```')) {
+          cleanedResult = cleanedResult.replace(/```\s*/g, '');
+        }
+        
+        // Remove any stray backticks
+        cleanedResult = cleanedResult.replace(/`/g, '').trim();
+        
+        // Additional cleanup for malformed JSON
+        // Handle case where there might be duplicate JSON arrays or extra content
+        if (cleanedResult.includes('][')) {
+          console.log(`[🔧 ${category}] Found duplicate arrays, taking first valid array`);
+          const firstArrayEnd = cleanedResult.indexOf('][');
+          cleanedResult = cleanedResult.substring(0, firstArrayEnd + 1);
+        }
+        
+        // Find the first complete JSON array if there's extra content after
+        const firstBracket = cleanedResult.indexOf('[');
+        if (firstBracket !== -1) {
+          let bracketCount = 0;
+          let endPos = firstBracket;
+          let inString = false;
+          let escapeNext = false;
+          
+          for (let i = firstBracket; i < cleanedResult.length; i++) {
+            const char = cleanedResult[i];
+            
+            if (escapeNext) {
+              escapeNext = false;
+              continue;
+            }
+            
+            if (char === '\\') {
+              escapeNext = true;
+              continue;
+            }
+            
+            if (char === '"' && !escapeNext) {
+              inString = !inString;
+              continue;
+            }
+            
+            if (!inString) {
+              if (char === '[') bracketCount++;
+              else if (char === ']') bracketCount--;
+              
+              if (bracketCount === 0) {
+                endPos = i + 1;
+                break;
+              }
+            }
+          }
+          
+          if (endPos > firstBracket && endPos < cleanedResult.length) {
+            console.log(`[🔧 ${category}] Trimming extra content after JSON array`);
+            const beforeTrim = cleanedResult;
+            cleanedResult = cleanedResult.substring(firstBracket, endPos);
+            console.log(`[🔧 ${category}] Trimmed from ${beforeTrim.length} to ${cleanedResult.length} chars`);
+          }
+        }
+        
+        // Parse and merge results
+        try {
+          // Ensure cleanedResult is still a valid string after all the processing
+          console.log(`[🔍 ${category}] Before validation - cleanedResult type: ${typeof cleanedResult}, length: ${cleanedResult?.length}`);
+          if (!cleanedResult || typeof cleanedResult !== 'string' || cleanedResult.trim().length === 0) {
+            console.warn(`[⚠️ ${category}] CleanedResult is not valid after processing, using original response`);
+            cleanedResult = categoryResult;
+          }
+          
+          const parsed = parseJsonRobustly(cleanedResult, category);
+          if (!parsed) {
+            throw new Error('parseJsonRobustly returned null - all parsing strategies failed');
+          }
+          if (Array.isArray(parsed)) {
+            console.log(`[✅ ${category} parsed successfully - ${parsed.length} fields]`);
+            console.log(`[📊 ${category} fields:`, parsed.map(p => p.field).join(', '));
+            // Tag each field with its source category for accurate counting
+            const taggedFields = parsed.map(field => ({ ...field, sourceCategory: category }));
+            allResults.push(...taggedFields);
+          } else if (parsed && typeof parsed === 'object' && parsed.field) {
+            // Handle single object response - wrap it in an array
+            console.warn(`[⚠️ Category ${category} returned single object instead of array - wrapping it]`);
+            console.log(`[✅ ${category} parsed successfully - 1 field (wrapped)]`);
+            console.log(`[📊 ${category} fields:`, parsed.field);
+            // Tag the single field with its source category
+            allResults.push({ ...parsed, sourceCategory: category });
+          } else {
+            console.warn(`[⚠️ Category ${category} did not return an array or valid object]`);
+          }
+        } catch (parseErr) {
+          console.warn(`[⚠️ Failed to parse category ${category} results]`, parseErr.message);
+          console.warn(`[🔍 Raw response preview for ${category}]:`, cleanedResult.substring(0, 200) + '...');
+          
+          // Try multiple fallback strategies
+          let fallbackParsed = null;
+          
+          // Strategy 1: Handle truncated JSON by finding last complete object
+          if (parseErr.message.includes('Unexpected end of JSON input') || parseErr.message.includes('Unterminated')) {
+            console.log(`[🩹 ${category}] Attempting to fix truncated JSON`);
+            
+            try {
+              // Find the last complete object by looking for complete "}," or "}" patterns
+              let truncatedResult = cleanedResult;
+              
+              // Find the last complete object ending
+              let lastCompleteEnd = -1;
+              let braceCount = 0;
+              let inString = false;
+              let escapeNext = false;
+              
+              for (let i = 0; i < truncatedResult.length; i++) {
+                const char = truncatedResult[i];
+                
+                if (escapeNext) {
+                  escapeNext = false;
+                  continue;
+                }
+                
+                if (char === '\\' && inString) {
+                  escapeNext = true;
+                  continue;
+                }
+                
+                if (char === '"' && !escapeNext) {
+                  inString = !inString;
+                  continue;
+                }
+                
+                if (!inString) {
+                  if (char === '{') braceCount++;
+                  else if (char === '}') {
+                    braceCount--;
+                    if (braceCount === 0) {
+                      lastCompleteEnd = i;
+                    }
+                  }
+                }
+              }
+              
+              if (lastCompleteEnd > 0) {
+                // Trim to last complete object and close array
+                const fixedJson = truncatedResult.substring(0, lastCompleteEnd + 1) + '\n]';
+                console.log(`[🔧 ${category}] Fixed JSON length: ${fixedJson.length}`);
+                
+                fallbackParsed = JSON.parse(fixedJson);
+                if (Array.isArray(fallbackParsed)) {
+                  console.log(`[✅ ${category} SALVAGED - ${fallbackParsed.length} fields from truncated response]`);
+                  console.log(`[📊 ${category} salvaged fields:`, fallbackParsed.map(p => p.field).join(', '));
+                }
+              } else {
+                console.warn(`[❌ ${category}] Could not find any complete objects in truncated JSON`);
+              }
+            } catch (salvageErr) {
+              console.warn(`[❌ ${category}] Failed to salvage truncated JSON:`, salvageErr.message);
+            }
+          }
+          
+          // Strategy 2: Handle <think> tag contamination
+          if (!fallbackParsed && parseErr.message.includes('Unexpected token') && cleanedResult.includes('<')) {
+            console.log(`[🩹 ${category}] Attempting to extract content after think tags`);
+            try {
+              // Try to find JSON content after any remaining < tags
+              const afterThinkPattern = />\s*(\[[\s\S]*?\]|\{[\s\S]*?\})/;
+              const match = cleanedResult.match(afterThinkPattern);
+              if (match) {
+                fallbackParsed = JSON.parse(match[1]);
+                console.log(`[✅ ${category}] Extracted JSON after think contamination`);
+              }
+            } catch (thinkErr) {
+              console.warn(`[❌ ${category}] Failed to extract after think tags:`, thinkErr.message);
+            }
+          }
+          
+          // Strategy 3: Final fallback - create minimal valid response
+          if (!fallbackParsed) {
+            console.log(`[🆘 ${category}] Creating minimal fallback response - all strategies failed`);
+            fallbackParsed = [
+              {
+                field: `${category}_parsing_failed`,
+                pdf: "Parse error",
+                web: "Parse error", 
+                match: false,
+                reason: `Failed to parse ${category} response: ${parseErr.message.substring(0, 100)}`
+              }
+            ];
+          }
+          
+          // Apply the fallback result
+          if (Array.isArray(fallbackParsed)) {
+            const taggedFallbackFields = fallbackParsed.map(field => ({ ...field, sourceCategory: category }));
+            allResults.push(...taggedFallbackFields);
+            console.log(`[🔧 ${category}] Applied fallback with ${fallbackParsed.length} fields`);
+          } else if (fallbackParsed && typeof fallbackParsed === 'object') {
+            allResults.push({ ...fallbackParsed, sourceCategory: category });
+            console.log(`[🔧 ${category}] Applied single fallback field`);
+          }
+        }
+        
+      } catch (err) {
+        console.error(`[❌ Failed to process category ${category}]`, err.message);
+        
+        // Add fallback comparison data for failed categories
+        console.log(`[🔧 Creating fallback comparison data for ${category}]`);
+        const fallbackFields = getFallbackComparisonFields(category, contractType);
+        // Tag fallback fields with their source category
+        const taggedFallbackFields = fallbackFields.map(field => ({ ...field, sourceCategory: category }));
+        allResults.push(...taggedFallbackFields);
+      }
+    }
+    
+    // Return combined results
+    console.log(`[✅ Lotus LLM comparison complete - ${allResults.length} fields compared]`);
+    console.log(`[📊 All comparison fields:`, allResults.map(r => r.field).join(', '));
+    console.log(`[📈 Results per category:`, allResults.reduce((acc, r) => {
+      // Use the actual source category instead of heuristic matching
+      const category = r.sourceCategory || 'unknown';
+      acc[category] = (acc[category] || 0) + 1;
+      return acc;
+    }, {}));
+    res.json({ response: JSON.stringify(allResults) });
+    
+  } catch (err) {
+    console.error('[❌ Gemini Compare Error]', err);
+    res.status(500).json({ message: 'Gemini comparison failed', error: err.message });
+  }
+});
+
+// ===== Modular Validation Endpoint =====
+app.post('/api/validate-modular', async (req, res) => {
+  console.log('[🔧 HIT /api/validate-modular]');
+  const { extractedData, contractType, contractNumber, sourceType = 'pdf' } = req.body;
+  
+  if (!extractedData || typeof extractedData !== 'object') {
+    console.error('[Modular Validation] Invalid extractedData:', extractedData);
+    return res.status(400).json({ message: 'Invalid extracted data' });
+  }
+  
+  if (!contractType) {
+    console.error('[Modular Validation] Missing contractType');
+    return res.status(400).json({ message: 'Contract type is required' });
+  }
+  
+  try {
+    // === Excel File Validations (Master_9_cell.xlsx, Master_PT.xlsx, bigtenant.xlsx) ===
+    let excelValidationResults = [];
+    const buildingId = extractedData['Building ID'];
+    const brandName = extractedData['Brand Name'];
+    const customerName = extractedData['Customer Name'];
+    
+    // 1) Master_9_cell.xlsx - Building ID check for deposit rules
+    let buildingFoundInExcel = false;
+    const masterExcelPath = path.join(__dirname, 'prompts', 'Master_9_cell.xlsx');
+    if (fs.existsSync(masterExcelPath)) {
+      console.log('[Modular Validation] Found Master_9_cell.xlsx; reading...');
+      try {
+        const workbook = xlsx.readFile(masterExcelPath);
+        const firstSheetName = workbook.SheetNames[0];
+        const masterData = xlsx.utils.sheet_to_json(workbook.Sheets[firstSheetName]);
+        
+        if (masterData.length > 0 && buildingId) {
+          const firstColumnHeader = Object.keys(masterData[0])[0];
+          buildingFoundInExcel = masterData.some(row => 
+            String(row[firstColumnHeader]).trim() === String(buildingId).trim()
+          );
+          console.log(buildingFoundInExcel 
+            ? `[Modular Validation] Building ID "${buildingId}" FOUND in Master_9_cell.xlsx`
+            : `[Modular Validation] Building ID "${buildingId}" NOT FOUND in Master_9_cell.xlsx`
+          );
+        }
+      } catch (err) {
+        console.error('[Modular Validation] Error reading Master_9_cell.xlsx:', err);
+      }
+    }
+    
+    // 2) Master_PT.xlsx - Brand Name check for tax rules
+    let brandFoundInPT = false;
+    const ptExcelPath = path.join(__dirname, 'prompts', 'Master_PT.xlsx');
+    if (fs.existsSync(ptExcelPath)) {
+      console.log('[Modular Validation] Found Master_PT.xlsx; reading...');
+      try {
+        const wbPT = xlsx.readFile(ptExcelPath);
+        const ptSheetName = wbPT.SheetNames[0];
+        const ptData = xlsx.utils.sheet_to_json(wbPT.Sheets[ptSheetName]);
+        
+        if (ptData.length > 0 && brandName) {
+          const secondColumnHeader = Object.keys(ptData[0])[1];
+          brandFoundInPT = ptData.some(row => {
+            const brandInSheet = String(row[secondColumnHeader] || '').trim().toLowerCase();
+            return brandInSheet === String(brandName).trim().toLowerCase();
+          });
+          console.log(brandFoundInPT 
+            ? `[Modular Validation] Brand Name "${brandName}" FOUND in Master_PT.xlsx`
+            : `[Modular Validation] Brand Name "${brandName}" NOT FOUND in Master_PT.xlsx`
+          );
+        }
+      } catch (err) {
+        console.error('[Modular Validation] Error reading Master_PT.xlsx:', err);
+      }
+    }
+    
+    // 3) bigtenant.xlsx - Customer Name check for deposit rules
+    let customerFoundInBigTenant = false;
+    const bigTenantPath = path.join(__dirname, 'prompts', 'bigtenant.xlsx');
+    if (fs.existsSync(bigTenantPath)) {
+      console.log('[Modular Validation] Found bigtenant.xlsx; reading...');
+      try {
+        const wbBig = xlsx.readFile(bigTenantPath);
+        const bigSheetName = wbBig.SheetNames[0];
+        const bigTenantData = xlsx.utils.sheet_to_json(wbBig.Sheets[bigSheetName]);
+        
+        if (bigTenantData.length > 0 && customerName) {
+          // Check all columns for customer name match (exact match, case-insensitive)
+          customerFoundInBigTenant = bigTenantData.some(row => {
+            return Object.values(row).some(cellValue => {
+              if (cellValue === null || cellValue === undefined || cellValue === '') {
+                return false;
+              }
+              const cellStr = String(cellValue).trim().toLowerCase();
+              const customerStr = String(customerName).trim().toLowerCase();
+              // Exact match only, no partial matches
+              return cellStr !== '' && cellStr === customerStr;
+            });
+          });
+          console.log(customerFoundInBigTenant 
+            ? `[Modular Validation] Customer Name "${customerName}" FOUND in bigtenant.xlsx`
+            : `[Modular Validation] Customer Name "${customerName}" NOT FOUND in bigtenant.xlsx`
+          );
+        }
+      } catch (err) {
+        console.error('[Modular Validation] Error reading bigtenant.xlsx:', err);
+      }
+    }
+
+    // Use PromptManager to get validation prompts
+    const promptManager = new PromptManager();
+    
+    // Optimized validation categories - reduced for Service Express to improve speed
+    let validationCategories;
+    if (sourceType === 'web') {
+      // Web validation categories
+      validationCategories = contractType === 'service_express' 
+        ? ['basic', 'contract_terms', 'business_part1', 'business_part4a', 'business_part4b'] // Simplified for Service Express
+        : ['basic', 'financial_part1', 'financial_part2', 'contract_terms', 'business_part1', 'business_part2', 'business_part3', 'business_part4a', 'business_part4b', 'business_part5', 'business_part6', 'deposits_part1', 'deposits_part2', 'deposits_part3'];
+    } else {
+      // PDF validation categories  
+      if (contractType === 'service_express') {
+        // Base Service Express validation categories
+        validationCategories = ['required', 'business_part1', 'business_part4a', 'business_part4b', 'deposit_rules_part1', 'deposit_rules_part2', 'signatures', 'citizen_id_part1', 'citizen_id_part2a', 'citizen_id_part2b'];
+        
+        // Add special LO deposit validation for LO contracts
+        if (contractNumber && contractNumber.includes('LO')) {
+          validationCategories.splice(6, 0, 'deposits_lo'); // Add after deposit_rules_part2
+          console.log('[Validation] Added deposits_lo validation for LO contract');
+        }
+      } else {
+        // Permanent Fixed validation categories
+        validationCategories = ['required', 'business_part1', 'business_part2', 'business_part3', 'business_part4a', 'business_part4b', 'business_part5', 'deposits_part1', 'deposits_part2', 'deposits_part3', 'signatures', 'citizen_id_part1', 'citizen_id_part2a', 'citizen_id_part2b'];
+      }
+    }
+    
+    // Use Lotus LLM API for validation
+    const LOTUS_LLM_URL = 'https://api-cpxis.lotuss.com/llm/v1/chat/completions';
+    const LOTUS_API_KEY = 'accounting.lotuss.F51DAF28FD6422DDF3CD864F833CC';
+    
+    // Process each validation category separately
+    const allValidationResults = [];
+    console.log(`[🔄 Using chunked Lotus LLM validation for ${sourceType}]`);
+    
+    for (const category of validationCategories) {
+      let finalPrompt; // Declare outside try block so catch can access it
+      
+      try {
+        console.log(`[📊 Processing validation category: ${category}]`);
+        let categoryPrompt = promptManager.createValidationPrompt(category, contractType, contractNumber, sourceType);
+        
+        if (!categoryPrompt) {
+          console.log(`[⏭️ Skipping ${category} validation for ${sourceType} data]`);
+          continue;
+        }
+        
+        // Modify prompts based on Excel lookups
+        if (category === 'deposits') {
+          // Add Excel lookup context to deposit validation
+          let excelContext = '\n--- EXCEL LOOKUP RESULTS ---\n';
+          
+          if (buildingFoundInExcel) {
+            excelContext += `Building ID "${buildingId}" FOUND in Master_9_cell.xlsx - Apply 2× deposit rule instead of 3×\n`;
+          } else {
+            excelContext += `Building ID "${buildingId}" NOT FOUND in Master_9_cell.xlsx - Apply standard deposit rules\n`;
+          }
+          
+          if (customerFoundInBigTenant) {
+            excelContext += `Customer Name "${customerName}" FOUND in bigtenant.xlsx - Apply big tenant deposit requirements (3× minimum)\n`;
+          } else {
+            excelContext += `Customer Name "${customerName}" NOT FOUND in bigtenant.xlsx - Apply standard deposit rules\n`;
+          }
+          
+          excelContext += '--- END EXCEL LOOKUPS ---\n\n';
+          categoryPrompt = excelContext + categoryPrompt;
+          
+          // Update deposit rules based on Excel lookups
+          if (customerFoundInBigTenant) {
+            categoryPrompt += '\n\n**SPECIAL RULE**: Customer is in bigtenant.xlsx - deposit must be ≥ 3 × Monthly rental rate regardless of other rules.';
+          } else if (buildingFoundInExcel) {
+            categoryPrompt += '\n\n**SPECIAL RULE**: Building ID found in Master_9_cell.xlsx - minimum deposit requirement is 2 × Monthly rental rate instead of standard 3×.';
+          }
+        }
+        
+        if (category === 'business') {
+          // Add Excel lookup context to business rules for tax validation
+          let taxContext = '\n--- TAX VALIDATION CONTEXT ---\n';
+          
+          if (brandFoundInPT) {
+            taxContext += `Brand Name "${brandName}" FOUND in Master_PT.xlsx - Lease property tax rate MUST be 0\n`;
+          } else {
+            taxContext += `Brand Name "${brandName}" NOT FOUND in Master_PT.xlsx - No special tax requirements\n`;
+          }
+          
+          taxContext += '--- END TAX CONTEXT ---\n\n';
+          categoryPrompt = taxContext + categoryPrompt;
+          
+          // Update tax validation rule
+          if (brandFoundInPT) {
+            categoryPrompt += '\n\n**SPECIAL TAX RULE**: Brand Name found in Master_PT.xlsx - "Lease property tax rate" must be exactly 0. If not 0, mark as invalid with reason: "Brand Name found in Master_PT.xlsx; Lease property tax rate must be zero".';
+          }
+        }
+        
+        finalPrompt = `${categoryPrompt}\n\nContract Data:\n${JSON.stringify(extractedData, null, 2)}`;
+        
+        // Add delay between requests to avoid overload
+        if (allValidationResults.length > 0) {
+          await new Promise(resolve => setTimeout(resolve, 3000)); // 3 second delay to reduce API load
+        }
+        
+        const response = await axios.post(LOTUS_LLM_URL, {
+          model: 'default',
+          messages: [
+            {
+              role: 'system',
+              content: 'You are a contract validation assistant. Return ONLY a valid JSON array without any markdown formatting, code blocks, or additional text. Do not use ```json or ``` markers.'
+            },
+            {
+              role: 'user',
+              content: finalPrompt
+            }
+          ],
+          temperature: 0.0, // Deterministic for speed
+          max_tokens: 2000, // Reduced to prevent 504 timeouts
+          chat_template_kwargs: {"enable_thinking": false} // Disable thinking for speed
+        }, {
+          headers: {
+            'Authorization': `Bearer ${LOTUS_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 60000 // Reduced to 60 seconds to prevent hanging
+        });
+        
+        // Handle new API response format where content might be in reasoning_content
+        const messageContent = response.data.choices[0].message.content;
+        const reasoningContent = response.data.choices[0].message.reasoning_content;
+        const categoryResult = messageContent || reasoningContent;
+        console.log(`[✅ Validation category ${category} processed successfully]`);
+        
+        // Clean the response directly (thinking mode disabled)
+        let cleanedResult = categoryResult.trim();
+        
+        // Remove markdown code blocks if present
+        if (cleanedResult.includes('```json')) {
+          cleanedResult = cleanedResult.replace(/```json\s*/gi, '').replace(/```/g, '');
+        } else if (cleanedResult.includes('```')) {
+          cleanedResult = cleanedResult.replace(/```\s*/g, '');
+        }
+        
+        // Remove any stray backticks
+        cleanedResult = cleanedResult.replace(/`/g, '').trim();
+        
+        // Additional cleanup for malformed JSON
+        // Handle case where there might be duplicate JSON arrays or extra content
+        if (cleanedResult.includes('][')) {
+          console.log(`[🔧 Validation ${category}] Found duplicate arrays, taking first valid array`);
+          const firstArrayEnd = cleanedResult.indexOf('][');
+          cleanedResult = cleanedResult.substring(0, firstArrayEnd + 1);
+        }
+        
+        // Find the first complete JSON array if there's extra content after
+        const firstBracket = cleanedResult.indexOf('[');
+        if (firstBracket !== -1) {
+          let bracketCount = 0;
+          let endPos = firstBracket;
+          let inString = false;
+          let escapeNext = false;
+          
+          for (let i = firstBracket; i < cleanedResult.length; i++) {
+            const char = cleanedResult[i];
+            
+            if (escapeNext) {
+              escapeNext = false;
+              continue;
+            }
+            
+            if (char === '\\') {
+              escapeNext = true;
+              continue;
+            }
+            
+            if (char === '"' && !escapeNext) {
+              inString = !inString;
+              continue;
+            }
+            
+            if (!inString) {
+              if (char === '[') bracketCount++;
+              else if (char === ']') bracketCount--;
+              
+              if (bracketCount === 0) {
+                endPos = i + 1;
+                break;
+              }
+            }
+          }
+          
+          if (endPos > firstBracket && endPos < cleanedResult.length) {
+            console.log(`[🔧 Validation ${category}] Trimming extra content after JSON array`);
+            const beforeTrim = cleanedResult;
+            cleanedResult = cleanedResult.substring(firstBracket, endPos);
+            console.log(`[🔧 Validation ${category}] Trimmed from ${beforeTrim.length} to ${cleanedResult.length} chars`);
+          }
+        }
+        
+        // Parse and merge results
+        try {
+          // Ensure cleanedResult is still a valid string after all the processing
+          console.log(`[🔍 Validation ${category}] Before validation - cleanedResult type: ${typeof cleanedResult}, length: ${cleanedResult?.length}`);
+          if (!cleanedResult || typeof cleanedResult !== 'string' || cleanedResult.trim().length === 0) {
+            console.warn(`[⚠️ Validation ${category}] CleanedResult is not valid after processing, using original response`);
+            cleanedResult = categoryResult;
+          }
+          
+          const parsed = parseJsonRobustly(cleanedResult, category);
+          if (!parsed) {
+            throw new Error('parseJsonRobustly returned null - all parsing strategies failed');
+          }
+          if (Array.isArray(parsed)) {
+            console.log(`[✅ Validation ${category} parsed successfully - ${parsed.length} checks]`);
+            console.log(`[📊 Validation ${category} fields:`, parsed.map(p => p.field || p.issue || 'unknown').join(', '));
+            
+            // Handle chunked validation merging
+            if (category.includes('_part1') || category.includes('_part2') || category.includes('_part3')) {
+              // Filter out null results from parts that indicate "proceed to next part"
+              const validResults = parsed.filter(item => item.valid !== null);
+              if (validResults.length > 0) {
+                console.log(`[🔀 ${category}] Adding ${validResults.length} valid results, filtered ${parsed.length - validResults.length} null results`);
+                allValidationResults.push(...validResults);
+              } else {
+                console.log(`[⏭️ ${category}] No valid results or empty array - skipping to avoid duplication`);
+              }
+            } else {
+              allValidationResults.push(...parsed);
+            }
+          } else {
+            console.warn(`[⚠️ Validation category ${category} did not return an array]`);
+          }
+        } catch (parseErr) {
+          console.warn(`[⚠️ Failed to parse validation category ${category} results]`, parseErr.message);
+          console.warn(`[🔍 Raw validation response for ${category}]:`, cleanedResult.substring(0, 1000));
+          console.warn(`[🔍 End of validation response for ${category}]:`, cleanedResult.substring(Math.max(0, cleanedResult.length - 200)));
+          
+          // Try to fix truncated JSON for validation
+          if (parseErr.message.includes('Unexpected end of JSON input')) {
+            console.log(`[🩹 Attempting AGGRESSIVE fix for validation ${category}]`);
+            try {
+              let fixedResult = cleanedResult.trim();
+              
+              // AGGRESSIVE: Remove any trailing incomplete text after last complete object
+              let lastCompleteObjectEnd = fixedResult.lastIndexOf('}');
+              if (lastCompleteObjectEnd > 0) {
+                // Keep everything up to the last complete object
+                let truncatedAtObject = fixedResult.substring(0, lastCompleteObjectEnd + 1);
+                
+                // Count brackets and braces in the truncated version
+                const openBrackets = (truncatedAtObject.match(/\[/g) || []).length;
+                const closeBrackets = (truncatedAtObject.match(/\]/g) || []).length;
+                const openBraces = (truncatedAtObject.match(/\{/g) || []).length;  
+                const closeBraces = (truncatedAtObject.match(/\}/g) || []).length;
+                
+                console.log(`[🔧 After truncation - Brackets: [${openBrackets}|${closeBrackets}], Braces: {${openBraces}|${closeBraces}}]`);
+                
+                // Add missing brackets
+                if (openBrackets > closeBrackets) {
+                  truncatedAtObject += ']' .repeat(openBrackets - closeBrackets);
+                  console.log(`[🔧 Added ${openBrackets - closeBrackets} closing brackets]`);
+                }
+                
+                fixedResult = truncatedAtObject;
+                console.log(`[🔧 Final result length: ${fixedResult.length}]`);
+                
+                const salvagedParsed = JSON.parse(fixedResult);
+                if (Array.isArray(salvagedParsed)) {
+                  console.log(`[✅ AGGRESSIVE FIX SUCCESS - recovered ${salvagedParsed.length} validation items for ${category}]`);
+                  allValidationResults.push(...salvagedParsed);
+                } else {
+                  console.warn(`[⚠️ Aggressive fix resulted in non-array for ${category}]`);
+                }
+              } else {
+                console.warn(`[⚠️ No complete objects found in ${category} response]`);
+              }
+            } catch (fixErr) {
+              console.warn(`[❌ Aggressive fix failed for ${category}:`, fixErr.message);
+            }
+          }
+        }
+        
+      } catch (err) {
+        console.error(`[❌ Failed to process validation category ${category}]`, err.message);
+        
+        // Handle 504 Gateway Timeout specifically
+        if (err.response && err.response.status === 504) {
+          console.log(`[🔄 Retrying ${category} with reduced token limit due to 504 timeout]`);
+          try {
+            // Safety check for finalPrompt
+            if (!finalPrompt) {
+              console.warn(`[⚠️ ${category}] finalPrompt is undefined, skipping retry`);
+              continue;
+            }
+            
+            // Create an improved shortened prompt for retry with more context
+            const dataStart = finalPrompt.indexOf('Data:') + 5;
+            const dataLimit = Math.min(dataStart + 4000, finalPrompt.length); // Increased to 4000 characters
+            const shortenedData = finalPrompt.substring(dataStart, dataLimit);
+            
+            const categorySpecificInstructions = {
+              'basic': 'Focus on checking if Contract Number, Customer Name, Brand Name, Building Name, Unit ID, Building ID, and Tenant Type are present.',
+              'required': 'Focus on checking if Contract Number, Brand Name, Tenant Type, Unit ID, and Building ID are present.',
+              'financial_part1': 'Check space and monthly rental rate fields.',
+              'financial_part2': 'Check rental and service deposit fields.',
+              'business_part1': 'Check billing frequency validation rules.',
+              'business_part2': 'Check net rent validation rules.',
+              'business_part3': 'Check utility inclusion and tenant selection validation rules.',
+              'business_part4a': 'Check monthly rental rate validation rules.',
+              'business_part4b': 'Check monthly service rate validation rules.',
+              'business_part5': 'Check rental and service deposit validation rules.',
+              'deposits': 'Validate deposit amounts against business rules and customer type requirements.',
+              'signatures': 'Check for presence of signatures and signee names for both CP Axtra and Customer.',
+              'citizen_id_part1': 'Validate citizen ID fields for individual customers.',
+              'citizen_id_part2a': 'Validate citizen ID and company registration fields for corporate customers.',
+              'citizen_id_part2b': 'Validate company certificate fields and stamps for corporate customers.',
+              'contract_terms': 'Check customer type, lease type, and contract terms validation.'
+            };
+            
+            const specificInstruction = categorySpecificInstructions[category] || `Validate fields in ${category} category.`;
+            
+            const shortenedPrompt = `Validation task: ${specificInstruction}
+
+Data excerpt: ${shortenedData}
+
+Return JSON array format: [{"field":"name","value":"extracted_value","valid":true/false,"reason":"brief_reason"}]`;
+
+            // Retry with MINIMAL settings for maximum speed and reliability
+            const retryResponse = await axios.post(LOTUS_LLM_URL, {
+              model: 'default',
+              messages: [
+                {
+                  role: 'system',
+                  content: 'Return ONLY valid JSON array. Be very concise.'
+                },
+                {
+                  role: 'user',
+                  content: shortenedPrompt
+                }
+              ],
+              temperature: 0.0, // Deterministic for speed
+              max_tokens: 1000, // Reduced for faster response
+              chat_template_kwargs: {"enable_thinking": false} // Disable thinking for fast retry
+              }, {
+              headers: {
+                'Authorization': `Bearer ${LOTUS_API_KEY}`,
+                'Content-Type': 'application/json'
+              },
+              timeout: 120000 // Increased to 2 minutes for larger documents
+            });
+            
+            let retryResult = retryResponse.data.choices[0].message.content;
+            console.log(`[🔄 ${category} retry response length:`, retryResult.length);
+            
+            // Clean the response to handle backticks and other formatting issues
+            retryResult = retryResult.trim();
+            if (retryResult.startsWith('```json')) retryResult = retryResult.slice(7);
+            if (retryResult.startsWith('```')) retryResult = retryResult.slice(3);
+            if (retryResult.endsWith('```')) retryResult = retryResult.slice(0, -3);
+            retryResult = retryResult.trim();
+            
+            const retryParsed = JSON.parse(retryResult);
+            if (Array.isArray(retryParsed)) {
+              allValidationResults.push(...retryParsed);
+              console.log(`[✅ ${category} retry successful - ${retryParsed.length} validation items]`);
+            }
+          } catch (retryErr) {
+            console.warn(`[⚠️ ${category} retry also failed:`, retryErr.message);
+          }
+        }
+      }
+    }
+    
+    // Add missing web validation fields if categories failed
+    if (sourceType === 'web') {
+      // Contract-specific expected fields
+      let expectedWebFields = [
+        "Contract Number", "Customer Name", "Brand Name", "Building Name", "Unit ID", "Space (NLA)", 
+        "Monthly Rental Rate", "Lease Type", "Building ID", "Customer Type", 
+        "Tenant Type", "Proposed lease commencement date", "Proposed lease expiry date", 
+        "Monthly Service Rate"
+      ];
+      
+      // Add contract-specific fields
+      if (contractType === 'permanent_fixed') {
+        expectedWebFields.push("อยู่กองทรัสต์หรือไม่", "Unit Status", "Rental Deposit", "Service Deposit");
+      }
+      // Service Express excludes: "อยู่กองทรัสต์หรือไม่", "Unit Status", "Rental Deposit", "Service Deposit"
+      
+      // Create a lowercase map for case-insensitive comparison
+      const currentFieldsLower = allValidationResults.map(r => (r.field || r.issue || '').toLowerCase());
+      const missingFields = expectedWebFields.filter(field => !currentFieldsLower.includes(field.toLowerCase()));
+      
+      if (missingFields.length > 0) {
+        console.log(`[🔧 Adding ${missingFields.length} missing web validation fields: ${missingFields.join(', ')}`);
+        // Only add truly missing fields, not ones that failed to parse
+        const fallbackValidations = missingFields.map(field => ({
+          field: field,
+          value: "Category parsing failed",
+          valid: false,
+          reason: "Validation category failed to parse - field not validated"
+        }));
+        allValidationResults.push(...fallbackValidations);
+      }
+    }
+    
+    // No longer filtering out Space Design Type - it's now included in PDF validation with context matching
+    
+    // Deduplicate validation results by field name (keep the first occurrence)
+    const seenFields = new Set();
+    const deduplicatedResults = allValidationResults.filter(result => {
+      const fieldName = result.field || result.issue || 'unknown';
+      if (seenFields.has(fieldName)) {
+        console.log(`[🔄 Deduplication] Removing duplicate field: ${fieldName}`);
+        return false;
+      }
+      seenFields.add(fieldName);
+      return true;
+    });
+
+    // Return deduplicated validation results
+    console.log(`[✅ Lotus LLM validation complete - ${deduplicatedResults.length} unique validation checks (${allValidationResults.length - deduplicatedResults.length} duplicates removed)]`);
+    console.log(`[📊 Final validation fields:`, deduplicatedResults.map(r => r.field || r.issue || 'unknown').join(', '));
+    res.json({ validation: deduplicatedResults });
+    
+  } catch (err) {
+    console.error('[❌ Modular Validation Error]', err);
+    res.status(500).json({ message: 'Modular validation failed', error: err.message });
+  }
+});
+
+// ===== Force Process Endpoint =====
+
+const API_URL = process.env.API_URL || 'http://localhost:5001';
+app.post('/api/force-process-contract', async (req, res) => {
+  const { contractNumber, promptKey = 'LOI_permanent_fixed_fields' } = req.body;
+  if (!contractNumber) {
+    return res
+      .status(400)
+      .json({ success: false, message: 'Missing contractNumber in request body' });
+  }
+
+  const doProcess = async () => {
+    // 1) Auto‐login to Simplicity so scrape‐URL calls will succeed
+    const loginRes = await axios.post(`${API_URL}/api/scrape-login`, {
+      systemType: 'simplicity',
+      username:   'john.pattanakarn@lotuss.com',
+      password:   'Gofresh@0725-19'
+    });
+    if (!loginRes.data.success) {
+      throw new Error('Auto-login to Simplicity failed');
+    }
+
+    // 2) Run the exact same pipeline you use in your folder‐processor,
+    //    but just for this one file.
+    const filename = `${contractNumber}.pdf`;
+    const ok = await processOneContract(filename, promptKey);
+    if (!ok) {
+      throw new Error(`Processing logic returned false for ${filename}`);
+    }
+  };
+
+  try {
+    // Log the start of force processing
+    try {
+      await axios.post(`${API_URL}/api/log-rpa-activity`, {
+        action: 'Force Process Started',
+        user: 'Admin User',
+        contractNumber,
+        status: 'Processing',
+        details: { promptKey }
+      });
+    } catch (logErr) {
+      console.warn('Failed to log RPA activity:', logErr.message);
+    }
+
+    try {
+      await doProcess();
+    } catch (err) {
+      // if we timed out clicking the Lease menu, clear the session and retry once
+      if (err.message.includes('Waiting for selector') && err.message.includes('li:nth-child(10) > a')) {
+        console.warn('[WARN] Lease-menu timeout, clearing session and retrying...');
+        browserSessions.delete('simplicity');
+        await doProcess();
+      } else {
+        throw err;
+      }
+    }
+
+    // Log successful completion
+    try {
+      await axios.post(`${API_URL}/api/log-rpa-activity`, {
+        action: 'Force Process Completed',
+        user: 'Admin User',
+        contractNumber,
+        status: 'Success',
+        details: { 
+          completedAt: new Date(),
+          promptKey 
+        }
+      });
+    } catch (logErr) {
+      console.warn('Failed to log RPA activity completion:', logErr.message);
+    }
+
+    return res.json({
+      success: true,
+      message: `Forced processing and end–to–end pipeline complete for ${contractNumber}`
+    });
+
+  } catch (err) {
+    console.error('[❌ Force Process Error]', err);
+    
+    // Log the error
+    try {
+      await axios.post(`${API_URL}/api/log-rpa-activity`, {
+        action: 'Force Process Failed',
+        user: 'Admin User',
+        contractNumber,
+        status: 'Error',
+        details: { 
+          error: err.message,
+          failedAt: new Date()
+        }
+      });
+    } catch (logErr) {
+      console.warn('Failed to log RPA activity error:', logErr.message);
+    }
+    
+    return res.status(500).json({
+      success: false,
+      message: 'Force processing failed',
+      error: err.message
+    });
+  }
+});
+
+
+
+app.post('/api/store-compare-result', async (req, res) => {
+  const { contractNumber, compareResult } = req.body;
+  if (!contractNumber) return res.status(400).json({ message: 'Missing contractNumber' });
+
+  try {
+    const docId = contractNumber.replace(/\//g, '_');
+    await db.collection('vision_results').doc(docId).set({
+      compare_result: compareResult
+    }, { merge: true });
+
+    res.json({ success: true, message: 'Comparison result saved' });
+  } catch (err) {
+    console.error('[Firestore Compare Save Error]', err);
+    res.status(500).json({ message: 'Failed to save compare result', error: err.message });
+  }
+});
+
+//Web validation
+app.post('/api/web-validate', async (req, res) => {
+  const { contractNumber, extractedData, promptKey = 'default' } = req.body;
+  if (!contractNumber || !extractedData || typeof extractedData !== 'object') {
+    console.error('[Web Validation] Missing or invalid input:', req.body);
+    return res.status(400).json({ message: 'Missing contractNumber or invalid extractedData' });
+  }
+
+  try {
+    // ─── 1) LOGIN / SESSION SETUP ─────────────────────────────────
+    const systemType = 'simplicity';
+    let browser, page;
+
+    if (browserSessions.has(systemType)) {
+      ({ browser, page } = browserSessions.get(systemType));
+      console.log('[LOGIN] Reusing existing Simplicity session');
+    } else {
+      console.log('[LOGIN] No session—launching new full-screen browser');
+      browser = await puppeteer.launch({
+        headless: false,
+        defaultViewport: null,
+        args: ['--start-fullscreen'],
+        protocolTimeout: 300000 // 5 minutes timeout
+      });
+      page = await browser.newPage();
+      page.setDefaultTimeout(0); // Disable all timeouts
+      page.setDefaultNavigationTimeout(0); // Disable navigation timeouts
+      await page.setViewport({ width: 1920, height: 1080 });
+
+      console.log('[LOGIN] Navigating to landing page');
+      await page.goto('https://mall-management.lotuss.com/Simplicity/apptop.aspx', {
+        waitUntil: 'networkidle2'
+      });
+
+      console.log('[LOGIN] clicking “go to login”');
+      await page.waitForSelector('#lblToLoginPage', { visible: true, timeout: 20000 });
+      await Promise.all([
+        page.click('#lblToLoginPage'),
+        page.waitForNavigation({ waitUntil: 'networkidle2' }).catch(() => {})
+      ]);
+
+      console.log('[LOGIN] entering username');
+      await page.waitForSelector('input#username', { visible: true, timeout: 20000 });
+      await page.type('input#username', 'john.pattanakarn@lotuss.com', { delay: 50 });
+
+      const continueSel1 =
+        '#root > div > div > div.sc-dymIpo.izSiFn > div.withConditionalBorder.sc-bnXvFD.izlagV ' +
+        '> div.sc-jzgbtB.bIuYUf > form > div > div:nth-child(3) > div > button';
+      console.log('[LOGIN] clicking Continue after username');
+      await page.waitForSelector(continueSel1, { visible: true, timeout: 20000 });
+      await page.click(continueSel1);
+
+      console.log('[LOGIN] entering password');
+      await page.waitForSelector('input#password', { visible: true, timeout: 20000 });
+      await page.type('input#password', 'Gofresh@0725-19', { delay: 50 });
+
+      const continueSel2 =
+        '#root > div > div > div.sc-dymIpo.izSiFn > div.withConditionalBorder.sc-bnXvFD.izlagV ' +
+        '> div.sc-jzgbtB.bIuYUf > form > div > div:nth-child(4) > div > button';
+      console.log('[LOGIN] clicking Continue after password');
+      await Promise.all([
+        page.click(continueSel2),
+        page.waitForNavigation({ waitUntil: 'networkidle2' }).catch(() => {})
+      ]);
+
+      console.log('[LOGIN] waiting for UI to settle');
+      await new Promise(r => setTimeout(r, 10000));
+
+      const postLoginHtml = await page.content();
+      if (postLoginHtml.includes('Invalid login')) {
+        console.error('[LOGIN] invalid credentials');
+        await browser.close();
+        return res.status(401).json({ success: false, message: 'Invalid credentials' });
+      }
+
+      console.log('[LOGIN] success');
+      browserSessions.set(systemType, { browser, page });
+    }
+
+    // ─── 2) GEMINI-BASED WEB VALIDATION ─────────────────────────────
+    const promptFilePath = path.join(__dirname, 'prompts', 'LOI_Sim_validation.txt');
+    if (!fs.existsSync(promptFilePath)) {
+      console.error('[VALIDATION] prompt file missing');
+      return res.status(400).json({ message: 'Validation prompt file not found.' });
+    }
+    const promptTemplate = fs.readFileSync(promptFilePath, 'utf8');
+    const finalPrompt = `${promptTemplate}\n\nExtracted Data:\n${JSON.stringify(extractedData, null, 2)}`;
+
+    console.log('[Web Validation] sending to Lotus LLM');
+    const response = await axios.post(LOTUS_LLM_URL, {
+      model: 'default',
+      messages: [
+        { role: 'system', content: 'You are a helpful assistant that validates information and returns only valid JSON arrays.' },
+        { role: 'user', content: finalPrompt }
+      ],
+      temperature: 0.1,
+      max_tokens: 5000,
+      chat_template_kwargs: { enable_thinking: false } // Enable thinking for better reasoning
+    }, {
+      headers: {
+        'Authorization': `Bearer ${LOTUS_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 30000
+    });
+    let lotusText = stripThinkTags(response.data.choices[0].message.content).trim();
+    if (lotusText.startsWith('```json')) lotusText = lotusText.slice(7);
+    if (lotusText.endsWith('```'))      lotusText = lotusText.slice(0, -3);
+
+    let parsedResult;
+    try {
+      parsedResult = JSON.parse(lotusText);
+      if (!Array.isArray(parsedResult)) throw new Error('Expected an array');
+    } catch (err) {
+      console.error('[Web Validation] parse error', err);
+      return res.status(500).json({ message: 'Failed to parse Lotus output', raw: lotusText });
+    }
+    console.log('[Web Validation] parsed result:', parsedResult);
+
+    // ─── extract workflow status from parsedResult ────────────────
+    const wfItem = parsedResult.find(
+      row => row.field && row.field.toLowerCase() === 'workflow status'
+    );
+    const workflowStatus = wfItem ? wfItem.value : null;
+    console.log('[Web Validation] workflow_status =', workflowStatus);
+
+    // ─── 3) OPTIONAL “Meter” SCRAPE + GEMINI CHECK ─────────────────
+    let utilityRaw = null;
+    let meterValidation = null;
+
+    // Debug the Include Utility field
+    console.log('[Utility Debug] extractedData["Include Utility"]:', extractedData['Include Utility']);
+    console.log('[Utility Debug] contractNumber:', contractNumber);
+    console.log('[Utility Debug] contractNumber.includes("LO"):', contractNumber.includes('LO'));
+    
+    // Check for variations in utility field name and value
+    const utilityValue = extractedData['Include Utility'] || extractedData['Utility'] || extractedData['Include utility'];
+    const isUtilityYes = utilityValue && (utilityValue.toLowerCase() === 'yes' || utilityValue.toLowerCase().includes('yes'));
+    
+    console.log('[Utility Debug] utilityValue (normalized):', utilityValue);
+    console.log('[Utility Debug] isUtilityYes:', isUtilityYes);
+    
+    if (isUtilityYes && contractNumber.includes('LO')) {
+      console.log('[Utility] Include Utility=Yes & LO… → scraping Meter…');
+
+      try {
+        // 3.1 scroll so the Utilities button is visible
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        console.log('[Utility] scrolled down');
+        await new Promise(r => setTimeout(r, 2000));
+
+        // 3.2 click Utilities top-menu
+        const utilSel = '#menu_MenuLiteralDiv > ul > li:nth-child(22) > a > div.cssmenu-item-label';
+        console.log('[Utility] clicking Utilities top-menu');
+        await page.waitForSelector(utilSel, { visible: true, timeout: 20000 });
+        await page.click(utilSel);
+
+        // 3.3 hover to expand submenu
+        console.log('[Utility] hovering Utilities submenu');
+        await page.evaluate(() => {
+          const li = document.querySelector('#menu_MenuLiteralDiv > ul > li:nth-child(22)');
+          li?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        });
+        await new Promise(r => setTimeout(r, 10000));
+
+        // 3.4 click "Meter" submenu with robust retry
+        console.log('[Utility] clicking Meter submenu');
+        await robustClickMeterSubmenu(page);
+        console.log('[Utility] Meter submenu clicked');
+
+        // 3.5 wait & switch to bottom iframe
+        await new Promise(r => setTimeout(r, 10000));
+        const frameHandle = await robustWaitForElement(page, 'iframe[name="frameBottom"]', 20000);
+        const frame = await frameHandle.contentFrame();
+       
+        await new Promise(r => setTimeout(r, 10000));
+// ─── 3.6 Combined Unit ID + Building ID search ────────────────────
+console.log('[Utility] preparing combined Unit ID + Building ID search');
+
+// wait for the main search box
+await frame.waitForSelector('#panel_SimpleSearch_c1', { visible: true, timeout: 20000 });
+
+// pull the 4-digit Building ID from your parsedResult
+const buildingRow = parsedResult.find(r => r.field === 'Building ID');
+const buildingId = buildingRow?.value || '';
+console.log('[Utility] fetched Building ID:', buildingId);
+
+// build the combined search string
+const unitId = extractedData['Unit ID'] || '';
+const combinedSearch = buildingId
+  ? `${unitId} ${buildingId}`
+  : unitId;
+
+console.log('[Utility] entering combined search:', combinedSearch);
+
+// clear & type the combined string
+await frame.click('#panel_SimpleSearch_c1', { clickCount: 3 });
+await frame.type('#panel_SimpleSearch_c1', combinedSearch, { delay: 50 });
+
+// click the initial Search button
+console.log('[Utility] clicking Search');
+await frame.evaluate(() => {
+  const btn = document.querySelector('a#panel_buttonSearch_bt');
+  btn?.click();
+});
+await new Promise(r => setTimeout(r, 15000));
+
+// scrape immediately
+utilityRaw = await frame.evaluate(() => document.body.innerText);
+console.log('[Utility] scraped raw after combined search:', utilityRaw);
+
+
+        // 3.8 run Lotus LLM on that Meter page
+        const meterPromptPath = path.join(__dirname, 'prompts', 'meter_check.txt');
+        if (fs.existsSync(meterPromptPath)) {
+          const meterTemplate = fs.readFileSync(meterPromptPath, 'utf8');
+          
+          // Add contract type and utility charges info for LO contracts
+          const isLOContract = contractNumber && contractNumber.includes('LO');
+          const contractInfo = isLOContract ? `\n\nCONTRACT_TYPE: LO
+WEB UTILITY CHARGES:
+- Utilities charge (Electricity): ${extractedData['Utilities charge (Electricity)'] || 0}
+- Utilities charge (water): ${extractedData['Utilities charge (water)'] || 0}  
+- Utilities charge (cooking gas): ${extractedData['Utilities charge (cooking gas)'] || 0}` : '\n\nCONTRACT_TYPE: NON-LO';
+          
+          const meterPrompt = `${meterTemplate}${contractInfo}\n\nMeter page content:\n${utilityRaw}`;
+          console.log('[Meter Validation] sending to Lotus LLM with contract info:', contractInfo.replace('\n', ' '));
+          
+          // Use Lotus LLM API for meter validation
+          const LOTUS_LLM_URL = 'https://api-cpxis.lotuss.com/llm/v1/chat/completions';
+          const LOTUS_API_KEY = 'accounting.lotuss.F51DAF28FD6422DDF3CD864F833CC';
+          
+          try {
+            const response = await axios.post(LOTUS_LLM_URL, {
+              model: 'default',
+              messages: [
+                {
+                  role: 'user',
+                  content: meterPrompt
+                }
+              ],
+              }, {
+              headers: {
+                'Authorization': `Bearer ${LOTUS_API_KEY}`,
+                'Content-Type': 'application/json'
+              },
+              timeout: 0 // No timeout - wait indefinitely
+            });
+
+            // Handle new API response format where content might be in reasoning_content
+            const messageContent = response.data.choices[0].message.content;
+            const reasoningContent = response.data.choices[0].message.reasoning_content;
+            let mText = (messageContent || reasoningContent).trim();
+            
+            // Use stripThinkTags to properly handle <think> tags and extract JSON
+            mText = stripThinkTags(mText);
+            
+            if (mText.startsWith('```json')) mText = mText.slice(7);
+            if (mText.endsWith('```')) mText = mText.slice(0, -3);
+
+            meterValidation = JSON.parse(mText);
+            console.log('[Meter Validation] parsed:', meterValidation);
+          } catch (e) {
+            console.error('[Meter Validation] parse failed', e);
+          }
+        } else {
+          console.warn('[Meter Validation] prompt file missing, skipping');
+        }
+      } catch (err) {
+        console.error('[Utility] scrape failed, continuing:', err);
+      }
+    }
+
+    // ─── 4) SAVE TO FIRESTORE ─────────────────────────────────────
+    const docId = contractNumber.replace(/\//g, '_');
+    await db.collection('compare_result').doc(docId).set({
+      web_validation_result: parsedResult,
+      workflow_status: workflowStatus,
+      utility_scrape: utilityRaw,
+      meter_validation_result: meterValidation,
+      updated_at: new Date()
+    }, { merge: true });
+
+    console.log(`[🔥] Web + utility + meter validation saved for ${docId}`);
+    return res.json({
+      success: true,
+      validationResult: parsedResult,
+      workflowStatus,
+      utilityRaw,
+      meterValidation
+    });
+  } catch (err) {
+    console.error('[❌ /api/web-validate Error]', err);
+    return res.status(500).json({ message: 'Web validation failed', error: err.message });
+  }
+});
+
+app.get('/api/get-lead-statuses', async (req, res) => {
+  try {
+    const snapshot = await dbAdapter.queryFileCheck({});
+    const statuses = {};
+    
+    if (dbAdapter.type === 'mongodb') {
+      // For MongoDB, we need to query Documents collection
+      const DocumentModel = mongoose.model('Document');
+      const documents = await DocumentModel.find({}).select('filename extractedData');
+      documents.forEach(doc => {
+        const leadStatus = doc.extractedData?.lead_status || '';
+        statuses[doc.filename] = leadStatus;
+      });
+    } else {
+      // For Firebase, use the existing logic
+      snapshot.docs.forEach(doc => {
+        const data = doc.data();
+        statuses[data.contract_number] = data.lead_status || '';
+      });
+    }
+    
+    return res.json({ success: true, statuses });
+  } catch (err) {
+    console.error('[GET Lead Statuses Error]', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
+// Attached Document validation
+app.post('/api/validate-document', async (req, res) => {
+  try {
+    const { extractedData, promptKey = 'default' } = req.body;
+
+    if (!extractedData || typeof extractedData !== 'object') {
+      console.error('[Validation] Invalid extractedData:', extractedData);
+      return res.status(400).json({ message: 'Invalid extracted data' });
+    }
+
+    // === Load Validation Prompt Template ===
+    const promptFilePath = path.join(__dirname, 'prompts', 'LOI_Doc_validation.txt');
+    if (!fs.existsSync(promptFilePath)) {
+      return res.status(400).json({ message: 'Validation prompt file not found.' });
+    }
+    const promptTemplate = fs.readFileSync(promptFilePath, 'utf8');
+
+    // === 1) Read Master_9_cell.xlsx and determine if Building ID is present ===
+    const masterExcelPath = path.join(__dirname, 'prompts', 'Master_9_cell.xlsx');
+    let masterData = [];
+    let firstColumnHeader = null;
+    const buildingId = extractedData['Building ID'];
+    req.buildingIdFoundInExcel = false;
+
+    if (fs.existsSync(masterExcelPath)) {
+      console.log('[Validation] Found Master_9_cell.xlsx; reading...');
+      try {
+        const workbook = xlsx.readFile(masterExcelPath);
+        const firstSheetName = workbook.SheetNames[0];
+        masterData = xlsx.utils.sheet_to_json(workbook.Sheets[firstSheetName]);
+        console.log('[Validation] Master_9_cell.xlsx contents (first 5 rows):', masterData.slice(0, 5));
+
+        if (masterData.length > 0) {
+          firstColumnHeader = Object.keys(masterData[0])[0];
+          console.log('[Validation] Detected first column header (column A):', firstColumnHeader);
+        }
+
+        if (buildingId && firstColumnHeader) {
+          const found = masterData.some(row => {
+            const cellValue = row[firstColumnHeader];
+            return (
+              cellValue !== undefined &&
+              String(cellValue).trim() === String(buildingId).trim()
+            );
+          });
+          req.buildingIdFoundInExcel = found;
+          console.log(
+            found
+              ? `[Validation] Building ID "${buildingId}" FOUND in Master_9_cell.xlsx.`
+              : `[Validation] Building ID "${buildingId}" NOT FOUND in Master_9_cell.xlsx.`
+          );
+        } else {
+          if (!buildingId) {
+            console.warn('[Validation] extractedData["Building ID"] is missing; skipping Excel lookup.');
+          } else {
+            console.warn('[Validation] Could not determine first column header; skipping Excel lookup.');
+          }
+        }
+      } catch (excelErr) {
+        console.error('[Validation] Error reading Master_9_cell.xlsx:', excelErr);
+        req.buildingIdFoundInExcel = false;
+      }
+    } else {
+      console.warn('[Validation] Master_9_cell.xlsx not found; skipping Excel lookup.');
+      req.buildingIdFoundInExcel = false;
+    }
+
+    // === 2) Extract deposit-related fields and validate deposit ===
+    const rawRate = extractedData['Monthly rental rate'];
+    const rawDeposit = extractedData['Total Property Deposit'];
+    const rawContractNumber = extractedData['Contract number'];
+    const tenantSelection = extractedData['Tenant Selection'];
+
+    const parseNumber = str => {
+      if (typeof str === 'number') return str;
+      if (typeof str !== 'string') return NaN;
+      return parseFloat(str.replace(/[^0-9.]/g, '')) || NaN;
+    };
+
+    const rate = parseNumber(rawRate);
+    const deposit = parseNumber(rawDeposit);
+    let depositValid = true;
+    let depositReason = '';
+
+    // Helper to ignore decimals
+    const roundIgnoreDecimal = num => Math.floor(num);
+
+    const isLO = typeof rawContractNumber === 'string' && rawContractNumber.includes('LO');
+    const isTenantNo = String(tenantSelection).trim().toLowerCase() === 'no';
+    const buildingFound = Boolean(req.buildingIdFoundInExcel);
+
+    if (isLO && isTenantNo) {
+      // Exception 2: LO + Tenant Selection = No → requires 4×
+      const expected = roundIgnoreDecimal(rate * 4);
+      if (roundIgnoreDecimal(deposit) < expected) {
+        depositValid = false;
+        depositReason = `Contract Number contains LO and Tenant Selection = No; Total Property Deposit (${deposit}) is less than 4 × Monthly rental rate (${rate} × 4 = ${expected}).`;
+      } else {
+        depositValid = true;
+        depositReason = `Contract Number contains LO and Tenant Selection = No; ${deposit} ≥ 4 × ${rate} (ignoring decimals).`;
+      }
+      console.log('[Validation] Deposit check (Exception 2):', depositReason);
+
+    } else if (buildingFound) {
+      // Exception 1: Building ID found → requires 2×
+      const expected = roundIgnoreDecimal(rate * 2);
+      if (roundIgnoreDecimal(deposit) < expected) {
+        depositValid = false;
+        depositReason = `Building ID ${buildingId} found in Master_9_cell.xlsx; Total Property Deposit (${deposit}) is less than 2 × Monthly rental rate (${rate} × 2 = ${expected}).`;
+      } else {
+        depositValid = true;
+        depositReason = `Building ID ${buildingId} found in Master_9_cell.xlsx; ${deposit} ≥ 2 × ${rate} (ignoring decimals).`;
+      }
+      console.log('[Validation] Deposit check (Exception 1):', depositReason);
+
+    } else {
+      // Default rule: requires 3×
+      const expected = roundIgnoreDecimal(rate * 3);
+      if (roundIgnoreDecimal(deposit) < expected) {
+        depositValid = false;
+        depositReason = `Total Property Deposit (${deposit}) is less than 3 × Monthly rental rate (${rate} × 3 = ${expected}).`;
+      } else {
+        depositValid = true;
+        depositReason = `Total Property Deposit (${deposit}) ≥ 3 × Monthly rental rate (${rate} × 3 = ${expected}).`;
+      }
+      console.log('[Validation] Deposit check (Default 3×):', depositReason);
+    }
+
+    // Attach the deposit check result
+    req.depositValidation = {
+      field: 'Total Property Deposit',
+      value: rawDeposit,
+      valid: depositValid,
+      reason: depositReason
+    };
+
+    // === 3) Read Master_PT.xlsx and validate Lease property tax rate ===
+    const taxExcelPath = path.join(__dirname, 'prompts', 'Master_PT.xlsx');
+    let ptData = [];
+    let brandList = [];
+    const brandNameRaw = extractedData['Brand Name'];
+    const rawTaxRate = extractedData['Lease property tax rate'];
+    const taxRate = parseNumber(rawTaxRate);
+    let taxValid = true;
+    let taxReason = '';
+
+    if (fs.existsSync(taxExcelPath)) {
+      console.log('[Validation] Found Master_PT.xlsx; reading...');
+      try {
+        const wbPT = xlsx.readFile(taxExcelPath);
+        const ptSheetName = wbPT.SheetNames[0];
+        ptData = xlsx.utils.sheet_to_json(wbPT.Sheets[ptSheetName]);
+        console.log('[Validation] Master_PT.xlsx contents (first 5 rows):', ptData.slice(0, 5));
+
+        if (ptData.length > 0) {
+          const secondColumnHeader = Object.keys(ptData[0])[1];
+          console.log('[Validation] Detected second column header (column B):', secondColumnHeader);
+          brandList = ptData.map(row => row[secondColumnHeader]).filter(v => v !== undefined && v !== null);
+        }
+
+        let foundInPT = false;
+        if (brandNameRaw && brandList.length > 0) {
+          foundInPT = brandList.some(b =>
+            String(b).trim().toLowerCase() === String(brandNameRaw).trim().toLowerCase()
+          );
+        }
+
+        if (foundInPT) {
+          if (taxRate === 0) {
+            taxValid = true;
+            taxReason = `Brand Name "${brandNameRaw}" found in Master_PT.xlsx; Lease property tax rate (${taxRate}) is zero.`;
+          } else {
+            taxValid = false;
+            taxReason = `Brand Name "${brandNameRaw}" found in Master_PT.xlsx; Lease property tax rate (${taxRate}) must be zero.`;
+          }
+          console.log('[Validation] Tax check (Brand in PT list):', taxReason);
+        } else {
+          console.log(
+            `[Validation] Brand Name "${brandNameRaw}" NOT FOUND in Master_PT.xlsx; no tax check required.`
+          );
+          taxValid = true;
+          taxReason = `Brand Name "${brandNameRaw}" not found in Master_PT.xlsx; no tax check required.`;
+        }
+      } catch (ptErr) {
+        console.error('[Validation] Error reading Master_PT.xlsx:', ptErr);
+        taxValid = true;
+        taxReason = 'Error reading Master_PT.xlsx; skipping tax check.';
+      }
+    } else {
+      console.warn('[Validation] Master_PT.xlsx not found; skipping tax lookup.');
+      taxValid = true;
+      taxReason = 'Master_PT.xlsx not found; skipping tax check.';
+    }
+
+    // Attach the tax check result
+    req.taxValidation = {
+      field: 'Lease property tax rate',
+      value: rawTaxRate,
+      valid: taxValid,
+      reason: taxReason
+    };
+
+    // === 4) Build a modified prompt for Gemini that accounts for skips if needed ===
+    let modifiedPromptTemplate = promptTemplate;
+
+    // If Building ID not found, tell Gemini to skip deposit check
+    if (!req.buildingIdFoundInExcel) {
+      console.log(
+        `[Validation] Overriding deposit rule because Building ID "${buildingId}" was not found in Master_9_cell.xlsx.`
+      );
+      modifiedPromptTemplate =
+        `NOTE: Building ID "${buildingId}" was NOT found in Master_9_cell.xlsx. Skip the “Total Property Deposit” check entirely.\n\n` +
+        promptTemplate;
+    } else {
+      console.log(
+        `[Validation] Leaving deposit rule in place (Building ID "${buildingId}" was found).`
+      );
+    }
+
+    // If Brand Name not found in PT, tell Gemini to skip tax check
+    const brandFoundInPT = !taxReason.includes('not found');
+    if (!brandFoundInPT) {
+      console.log(
+        `[Validation] Overriding tax rule because Brand Name "${brandNameRaw}" was not found in Master_PT.xlsx.`
+      );
+      modifiedPromptTemplate =
+        `NOTE: Brand Name "${brandNameRaw}" was NOT found in Master_PT.xlsx. Skip the “Lease property tax rate” check entirely.\n\n` +
+        modifiedPromptTemplate;
+    } else {
+      console.log(
+        `[Validation] Leaving tax rule in place (Brand Name "${brandNameRaw}" was found).`
+      );
+    }
+
+    // === 5) Final Lotus LLM prompt and send to Lotus LLM ===
+    const finalPrompt =
+      `${modifiedPromptTemplate}\n\nExtracted Data:\n${JSON.stringify(extractedData, null, 2)}`;
+
+    const response = await axios.post(LOTUS_LLM_URL, {
+      model: 'default',
+      messages: [
+        { role: 'system', content: 'You are a helpful assistant that validates information and returns only valid JSON.' },
+        { role: 'user', content: finalPrompt }
+      ],
+      temperature: 0.1,
+      max_tokens: 5000,
+      chat_template_kwargs: { enable_thinking: false } // Enable thinking for better reasoning
+    }, {
+      headers: {
+        'Authorization': `Bearer ${LOTUS_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 30000
+    });
+    let lotusText = stripThinkTags(response.data.choices[0].message.content).trim();
+
+    // === 6) Strip any ```json fences if present ===
+    if (lotusText.startsWith('```json')) {
+      lotusText = lotusText.slice(7);
+    }
+    if (lotusText.endsWith('```')) {
+      lotusText = lotusText.slice(0, -3);
+    }
+    lotusText = lotusText.trim();
+
+    // === 7) Return deposit-check, tax-check, and Lotus result ===
+    return res.json({
+      validation: lotusText,
+      depositCheck: req.depositValidation,
+      taxCheck: req.taxValidation
+    });
+  } catch (err) {
+    console.error('[Validation Error]', err);
+    return res.status(500).json({ message: 'Validation failed', error: err.message });
+  }
+});
+
+// Function to sanitize JSON and remove null fields or any invalid commas
+function sanitizeJson(data) {
+  const sanitized = {};
+  Object.keys(data).forEach((key) => {
+    const value = data[key];
+    if (value !== null && value !== undefined) {
+      sanitized[key] = value; // Keep valid fields
+    } else {
+      sanitized[key] = ''; // Set missing or null fields to empty string to avoid invalid JSON
+    }
+  });
+  return sanitized;
+}
+
+// End of Attached Document validation
+
+app.post('/api/refresh-contract-status', async (req, res) => {
+  const { contractNumber } = req.body;
+  if (!contractNumber) {
+    return res.status(400).json({ message: 'Missing contractNumber' });
+  }
+
+  try {
+    const systemType = 'simplicity';
+    let browser, page;
+
+    // ─── 1) LOGIN / SESSION SETUP ─────────────────────────────
+    if (browserSessions.has(systemType)) {
+      ({ browser, page } = browserSessions.get(systemType));
+      console.log('[REFRESH] Reusing existing session');
+    } else {
+      console.log('[REFRESH] No session — performing login');
+      // mirror your check-contract-status login logic here
+      browser = await puppeteer.launch({ 
+        headless: false,
+        protocolTimeout: 300000 // 5 minutes timeout
+      });
+      page = await browser.newPage();
+      page.setDefaultTimeout(0); // Disable all timeouts
+      page.setDefaultNavigationTimeout(0); // Disable navigation timeouts
+      console.log('[REFRESH] goto landing page');
+      await page.goto('https://mall-management.lotuss.com/Simplicity/apptop.aspx', { waitUntil: 'networkidle2' });
+
+      console.log('[REFRESH] click “go to login”');
+      await page.waitForSelector('#lblToLoginPage', { visible: true, timeout: 20000 });
+      await Promise.all([
+        page.click('#lblToLoginPage'),
+        page.waitForNavigation({ waitUntil: 'networkidle2' }).catch(() => {}),
+      ]);
+
+      console.log('[REFRESH] enter username');
+      await page.waitForSelector('input#username', { visible: true, timeout: 20000 });
+      await page.type('input#username', 'john.pattanakarn@lotuss.com', { delay: 50 });
+      const cont1 = '#root > div > div > div.sc-dymIpo.izSiFn > div.withConditionalBorder.sc-bnXvFD.izlagV > div.sc-jzgbtB.bIuYUf > form > div > div:nth-child(3) > div > button';
+      console.log('[REFRESH] click username Continue');
+      await page.waitForSelector(cont1, { visible: true, timeout: 20000 });
+      await page.click(cont1);
+
+      console.log('[REFRESH] enter password');
+      await page.waitForSelector('input#password', { visible: true, timeout: 20000 });
+      await page.type('input#password', 'Gofresh@0725-19', { delay: 50 });
+      const cont2 = '#root > div > div > div.sc-dymIpo.izSiFn > div.withConditionalBorder.sc-bnXvFD.izlagV > div.sc-jzgbtB.bIuYUf > form > div > div:nth-child(4) > div > button';
+      console.log('[REFRESH] click password Continue');
+      await Promise.all([
+        page.click(cont2),
+        page.waitForNavigation({ waitUntil: 'networkidle2' }).catch(() => {}),
+      ]);
+
+      console.log('[REFRESH] login settled');
+      await new Promise(r => setTimeout(r, 10000));
+
+      const postLogin = await page.content();
+      if (postLogin.includes('Invalid login')) {
+        console.error('[REFRESH] Invalid credentials');
+        await browser.close();
+        return res.status(401).json({ message: 'Invalid credentials' });
+      }
+
+      console.log('[REFRESH] login success');
+      browserSessions.set(systemType, { browser, page });
+    }
+
+    // ─── 2) RELOAD / RESET FRAMEWORK ────────────────────────────
+    console.log('[REFRESH] reloading landing page to clear old frames');
+    await page.goto('https://mall-management.lotuss.com/Simplicity/apptop.aspx', { waitUntil: 'networkidle2' });
+    await new Promise(r => setTimeout(r, 2000));
+
+    // ─── 3) NAVIGATE TO LEASE → SUBMENU ────────────────────────
+    console.log('[REFRESH] clicking Lease top menu');
+    const leaseTop = '#menu_MenuLiteralDiv > ul > li:nth-child(10) > a';
+    await page.waitForSelector(leaseTop, { visible: true, timeout: 15000 });
+    await page.click(leaseTop);
+
+    console.log('[REFRESH] hover Lease to expand');
+    await page.evaluate(() => {
+      const el = [...document.querySelectorAll('a')].find(a => a.textContent.trim() === 'Lease');
+      if (el) el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    });
+    await new Promise(r => setTimeout(r, 2000));
+
+    const isOffer = contractNumber.includes('LO');
+    const submenuText = isOffer ? 'Lease Offer' : 'Lease Renewal';
+    console.log(`[REFRESH] clicking submenu "${submenuText}"`);
+    
+    // Use robust retry mechanism for clicking submenu
+    await robustClickSubmenu(page, submenuText, contractNumber);
+    await new Promise(r => setTimeout(r, 5000));
+
+    // ─── 4) RE-ACQUIRE IFRAME & EXTRACT STATUS ─────────────────
+    console.log('[REFRESH] waiting for search iframe');
+    const iframeHandle = await robustWaitForElement(page, 'iframe[name="frameBottom"]', 20000);
+    const frame = await iframeHandle.contentFrame();
+    if (!frame) throw new Error('Could not get contentFrame()');
+
+    console.log('[REFRESH] entering contract number');
+    await frame.waitForSelector('#panel_SimpleSearch_c1', { visible: true, timeout: 15000 });
+    await frame.evaluate((cn) => {
+      const inp = document.querySelector('#panel_SimpleSearch_c1');
+      inp.value = cn;
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+    }, contractNumber);
+
+    console.log('[REFRESH] clicking search');
+    await frame.waitForSelector('a#panel_buttonSearch_bt', { visible: true, timeout: 10000 });
+    await frame.click('a#panel_buttonSearch_bt');
+    await new Promise(r => setTimeout(r, 5000));
+
+    console.log('[REFRESH] extracting status cell');
+    const statusXPath = isOffer
+      ? '//*[@id="gridResults_gv"]/tbody/tr[2]/td[13]'
+      : '//*[@id="gridResults_gv"]/tbody/tr[2]/td[12]';
+    const statusText = await frame.evaluate(xpath => {
+      const r = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+      return r.singleNodeValue?.textContent.trim() ?? null;
+    }, statusXPath);
+
+    console.log(`[REFRESH] ${contractNumber} → "${statusText}"`);
+
+    // ─── 5) SAVE BACK TO FIRESTORE ─────────────────────────────
+    const docId = contractNumber.replace(/\//g, '_');
+    await db.collection('compare_result').doc(docId).set({
+      workflow_status: statusText,
+      updated_at: new Date()
+    }, { merge: true });
+    console.log(`[REFRESH] workflow_status updated in Firestore for ${docId}`);
+
+    return res.json({ success: true, status: statusText });
+
+  } catch (err) {
+    console.error('[REFRESH] Error:', err);
+    return res.status(500).json({ message: 'Failed to refresh contract status', error: err.message });
+  }
+});
+
+app.post('/api/store-validation-result', async (req, res) => {
+  const { contractNumber, validationResult } = req.body;
+  if (!contractNumber) return res.status(400).json({ message: 'Missing contractNumber' });
+
+  try {
+    const docId = contractNumber.replace(/\//g, '_');
+    await db.collection('vision_results').doc(docId).set({
+      document_validation: validationResult
+    }, { merge: true });
+
+    res.json({ success: true, message: 'Validation result saved' });
+  } catch (err) {
+    console.error('[Firestore Validation Save Error]', err);
+    res.status(500).json({ message: 'Failed to save validation result', error: err.message });
+  }
+});
+
+// === Save comparison and validation result under compare_result ===
+app.post('/api/save-compare-result', async (req, res) => {
+  const {
+    contractNumber,
+    compareResult,
+    pdfLotus,
+    webLotus,
+    pdfGemini, // Keep for backwards compatibility
+    webGemini, // Keep for backwards compatibility
+    validationResult,
+    webValidationResult, // ✅ Add missing web validation field
+    meterValidationResult, // ✅ Add missing meter validation field
+    popupUrl // ✅ New field added
+  } = req.body;
+  
+  // Support both old and new field names
+  const pdfData = pdfLotus || pdfGemini;
+  const webData = webLotus || webGemini;
+
+  // ✅ VALIDATION: Ensure contractNumber doesn't contain confidence percentages or invalid characters
+  if (!contractNumber || typeof contractNumber !== 'string') {
+    return res.status(400).json({ message: 'Invalid or missing contractNumber' });
+  }
+  
+  if (contractNumber.includes('%') || contractNumber.includes('confidence') || contractNumber.includes('Confidence')) {
+    console.error(`[❌ VALIDATION ERROR] contractNumber contains invalid data: "${contractNumber}"`);
+    return res.status(400).json({ 
+      message: 'Invalid contractNumber - contains confidence data instead of contract ID',
+      receivedValue: contractNumber 
+    });
+  }
+
+  try {
+    const docId = contractNumber.replace(/\//g, '_');
+    console.log('[Debug] Incoming save payload:', {
+      contractNumber,
+      compareResult: compareResult ? 'present' : 'missing',
+      pdfData: pdfData ? 'present' : 'missing',
+      webData: webData ? 'present' : 'missing',
+      validationResult: Array.isArray(validationResult) ? `${validationResult.length} items` : 'missing',
+      webValidationResult: Array.isArray(webValidationResult) ? `${webValidationResult.length} items` : 'missing',
+      meterValidationResult: Array.isArray(meterValidationResult) ? `${meterValidationResult.length} items` : (meterValidationResult ? 'present but not array' : 'missing'),
+      popupUrl
+    });
+    
+    // Additional debug for meter validation
+    if (meterValidationResult) {
+      console.log('[Debug] meterValidationResult type:', typeof meterValidationResult);
+      console.log('[Debug] meterValidationResult content preview:', JSON.stringify(meterValidationResult).substring(0, 200));
+    }
+    // Fetch OCR confidence from vision_results if available
+    let ocrConfidence = null;
+    console.log(`[🔍 Contract Number Debug] Looking for compare_result contract: "${contractNumber}"`);
+    console.log(`[🔍 Contract Number Debug] Document ID for vision_results lookup: "${docId}"`);
+    console.log(`[OCR Confidence] Checking for ${docId}...`);
+    try {
+      const visionDoc = await db.collection('vision_results').doc(docId).get();
+      if (visionDoc.exists) {
+        const visionData = visionDoc.data();
+        if (visionData.ocr_confidence !== undefined) {
+          ocrConfidence = visionData.ocr_confidence;
+          console.log(`[✅ OCR Confidence] Found for ${docId}: ${(ocrConfidence * 100).toFixed(1)}%`);
+          console.log(`[✅ OCR Confidence] Will be saved to compare_result and displayed in frontend`);
+        } else {
+          console.log(`[⚠️ OCR Confidence] Vision document exists for ${docId} but no confidence field`);
+          console.log(`[⚠️ OCR Confidence] Frontend will show "—" for this document`);
+        }
+      } else {
+        console.log(`[❌ OCR Confidence] No vision_results document found for ${docId}`);
+        console.log(`[❌ OCR Confidence] Frontend will show "—" for this document`);
+      }
+    } catch (err) {
+      console.warn(`[❌ OCR Confidence] Error fetching for ${docId}:`, err.message);
+    }
+
+    // Extract lease_type and tenant_type from PDF data if available
+    let leaseType = '';
+    let tenantType = '';
+    
+    try {
+      if (pdfData && typeof pdfData === 'string') {
+        // Extract from PDF JSON string
+        const leaseTypeMatch = pdfData.match(/"Lease Type"\s*:\s*"([^"]+)"/);
+        if (leaseTypeMatch) leaseType = leaseTypeMatch[1];
+        
+        const tenantTypeMatch = pdfData.match(/"Tenant Type"\s*:\s*"([^"]+)"/);
+        if (tenantTypeMatch) tenantType = tenantTypeMatch[1];
+      } else if (pdfData && typeof pdfData === 'object') {
+        // Extract from PDF object
+        leaseType = pdfData['Lease Type'] || '';
+        tenantType = pdfData['Tenant Type'] || '';
+      }
+      
+      console.log(`[📄 PDF Fields] Extracted - Lease Type: "${leaseType}", Tenant Type: "${tenantType}"`);
+    } catch (err) {
+      console.warn('[⚠️ Could not extract lease/tenant type from PDF data]', err.message);
+    }
+
+    // ✅ SAFEGUARD: Ensure we save the correct contract number (not confidence data)
+    console.log(`[🔒 SAFEGUARD] Saving contract_number: "${contractNumber}" (should NOT contain % or confidence)`);
+    
+    await db.collection('compare_result').doc(docId).set({
+      timestamp: new Date(),
+      contract_number: contractNumber, // This is now validated above
+      pdf_extracted: pdfData,
+      web_extracted: webData,
+      compare_result: compareResult,
+      validation_result: validationResult,
+      web_validation_result: webValidationResult, // ✅ Save web validation data
+      meter_validation_result: meterValidationResult, // ✅ Save meter validation data
+      popup_url: popupUrl || null,
+      ocr_confidence: ocrConfidence,
+      lease_type: leaseType, // ✅ Add lease type from PDF
+      tenant_type: tenantType // ✅ Add tenant type from PDF
+    }, { merge: true }); // ✅ ensure i
+    console.log('[Firebase Save] Saving popup_url:', popupUrl);
+    console.log(`[🔥 compare_result] Document saved: ${docId}`);
+    res.json({ success: true, message: 'Comparison and validation result saved' });
+  } catch (err) {
+    console.error('[Firestore compare_result Save Error]', err);
+    res.status(500).json({ message: 'Failed to save compare result', error: err.message });
+  }
+});
+
+app.post('/api/save-extracted-data', async (req, res) => {
+  try {
+    const { contractNumber, lotusOutput, pdfData } = req.body;
+
+    if (!contractNumber || !lotusOutput) {
+      return res.status(400).json({ message: 'Missing required fields' });
+    }
+
+    // Save extracted data to Firebase or your database
+    const docId = contractNumber.replace(/\//g, '_');
+    await db.collection('extracted_data').doc(docId).set({
+      contractNumber,
+      lotusOutput,
+      pdfData,
+      timestamp: new Date(),
+    });
+
+    console.log(`[🔥 Firebase] Document saved as ID: ${docId}`);
+    res.status(200).json({ success: true, message: 'Data saved successfully' });
+  } catch (err) {
+    console.error('[❌ Save Extracted Data Error]', err);
+    res.status(500).json({ message: 'Error saving extracted data', error: err.message });
+  }
+});
+
+app.post('/api/save-validation-result', async (req, res) => {
+  const { contractNumber, validationResult } = req.body;
+
+  if (!contractNumber || !validationResult) {
+    return res.status(400).json({ message: 'Missing contractNumber or validationResult' });
+  }
+
+  try {
+    const docId = contractNumber.replace(/\//g, '_');
+
+    await db.collection('compare_result').doc(docId).set({
+      validation_result: validationResult,
+      updated_at: new Date()
+    }, { merge: true });
+
+    console.log(`[🔥 compare_result] Validation result saved for: ${docId}`);
+    res.json({ success: true, message: 'Validation result saved to compare_result' });
+  } catch (err) {
+    console.error('[Firestore validation-only save error]', err);
+    res.status(500).json({ message: 'Failed to save validation result', error: err.message });
+  }
+});
+
+app.post('/api/upload-file', upload_2.any(), (req, res) => {
+  try {
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: 'No files uploaded' });
+    }
+
+    const targetPath = req.query.path || '';
+    const targetDir = path.join(__dirname, targetPath);
+
+    // Ensure target directory exists
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+
+    const saved = [];
+    
+    // Move files from upload location to target directory
+    for (const file of req.files) {
+      const sourcePath = file.path;
+      const targetFilePath = path.join(targetDir, file.originalname);
+      
+      // Move file to target location
+      fs.renameSync(sourcePath, targetFilePath);
+      saved.push(file.originalname);
+    }
+
+    res.json({ files: saved, message: `Uploaded ${saved.length} file(s) to ${targetPath}` });
+  } catch (error) {
+    console.error('Upload error:', error);
+    res.status(500).json({ error: 'Failed to upload files' });
+  }
+});
+
+// —–––––––
+// DELETE /api/delete-entry?path=<contracts|processed>/<filename.pdf>
+// —–––––––
+app.delete('/api/delete-entry', async (req, res) => {
+  const requested = req.query.path;
+  if (!requested) {
+    return res.status(400).json({ error: 'Path query required' });
+  }
+
+  const fullPath = path.join(__dirname, requested);
+  
+  // Security check - prevent path traversal
+  if (!fullPath.startsWith(__dirname)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  try {
+    // Check if path exists
+    await fs.promises.access(fullPath);
+    
+    // Check if it's a file or directory
+    const stats = await fs.promises.stat(fullPath);
+    
+    if (stats.isDirectory()) {
+      // Delete directory recursively
+      await fs.promises.rm(fullPath, { recursive: true, force: true });
+      res.json({ message: 'Directory deleted', path: requested });
+    } else {
+      // Delete file
+      await fs.promises.unlink(fullPath);
+      res.json({ message: 'File deleted', path: requested });
+    }
+  } catch (err) {
+    console.error('delete-entry error', err);
+    if (err.code === 'ENOENT') {
+      return res.status(404).json({ error: 'File or directory not found' });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/update-lead-status', async (req, res) => {
+  const { contractNumber, leadStatus } = req.body;
+
+  if (!contractNumber || !leadStatus) {
+    return res.status(400).json({ message: 'Missing contractNumber or leadStatus' });
+  }
+
+  try {
+    const docId = contractNumber.replace(/\//g, '_');
+
+    if (dbAdapter.type === 'mongodb') {
+      // For MongoDB, update the Document
+      const DocumentModel = mongoose.model('Document');
+      const doc = await DocumentModel.findOne({ filename: docId });
+      if (doc) {
+        doc.extractedData = { ...doc.extractedData, lead_status: leadStatus };
+        await doc.save();
+      } else {
+        // Create new document if not exists
+        const newDoc = new DocumentModel({
+          filename: docId,
+          originalName: docId,
+          filePath: `contracts/${docId}.pdf`,
+          size: 0,
+          fileType: 'pdf',
+          mimeType: 'application/pdf',
+          status: 'processing',
+          extractedData: { lead_status: leadStatus }
+        });
+        await newDoc.save();
+      }
+    } else {
+      // For Firebase
+      await db.collection('compare_result').doc(docId).set({
+        lead_status: leadStatus,
+        updated_at: new Date(),
+      }, { merge: true });
+    }
+
+    console.log(`[🔥 Lead Status] Updated lead_status for ${docId} to "${leadStatus}"`);
+    res.json({ success: true, message: 'Lead status updated' });
+  } catch (err) {
+    console.error('[❌ Update Lead Status Error]', err);
+    res.status(500).json({ message: 'Failed to update lead status', error: err.message });
+  }
+});
+
+app.get('/api/get-compare-results', async (req, res) => {
+  try {
+    let data = [];
+    
+    if (dbAdapter.type === 'mongodb') {
+      // For MongoDB, query Documents collection
+      const DocumentModel = mongoose.model('Document');
+      const documents = await DocumentModel.find({})
+        .sort({ createdAt: -1 })
+        .limit(100);
+      
+      data = documents.map(doc => ({
+        id: doc.filename,
+        contract_number: doc.filename,  // Add this for frontend compatibility
+        ...doc.extractedData,
+        ocr_confidence: doc.extractedData?.ocr_confidence || null,
+        timestamp: doc.createdAt
+      }));
+    } else {
+      // For Firebase
+      const snapshot = await db.collection('compare_result').orderBy('timestamp', 'desc').limit(100).get();
+      data = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        ocr_confidence: doc.data().ocr_confidence || null
+      }));
+    }
+
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('[🔥 get-compare-results error]', err);
+    res.status(500).json({ message: 'Failed to fetch compare results', error: err.message });
+  }
+});
+
+// Endpoint to get RPA logs
+app.get('/api/get-rpa-logs', async (req, res) => {
+  try {
+    let logs = [];
+    
+    if (DATABASE_TYPE === 'mongodb') {
+      // Read from RPA logs collection
+      const RPALogModel = mongoose.model('RPALog');
+      const rpaLogs = await RPALogModel.find({})
+        .sort({ timestamp: -1 })
+        .limit(100);
+      
+      logs = rpaLogs.map(log => ({
+        id: log._id,
+        timestamp: log.timestamp,
+        action: log.action,
+        user: log.user,
+        contractNumber: log.contractNumber,
+        status: log.status,
+        actionType: log.actionType,
+        details: log.details || {}
+      }));
+      
+      console.log(`[📊 get-rpa-logs] Retrieved ${logs.length} RPA logs from MongoDB`);
+    } else {
+      // For Firebase, query the rpa_logs collection
+      try {
+        const snapshot = await db.collection('rpa_logs').orderBy('timestamp', 'desc').limit(100).get();
+        if (!snapshot.empty) {
+          logs = snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+          }));
+          console.log(`[📊 get-rpa-logs] Retrieved ${logs.length} RPA logs from Firebase`);
+        } else {
+          // Fallback: create logs from compare_result data
+          console.log('[📊 get-rpa-logs] No RPA logs found, creating from compare_result data');
+          const compareSnapshot = await db.collection('compare_result').orderBy('timestamp', 'desc').limit(20).get();
+          logs = compareSnapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+              timestamp: data.timestamp,
+              action: 'Process Contract',
+              user: 'System',
+              contractNumber: data.contract_number,
+              status: data.validation_result ? 'Success' : 'Processing',
+              actionType: 'autoprocess',
+              details: {
+                processedAt: data.timestamp,
+                ocrConfidence: data.ocr_confidence
+              }
+            };
+          });
+        }
+      } catch (logError) {
+        console.log('RPA logs collection not found, creating sample data');
+        logs = [];
+      }
+    }
+
+    res.json({ success: true, logs });
+  } catch (err) {
+    console.error('[🔥 get-rpa-logs error]', err);
+    res.status(500).json({ message: 'Failed to fetch RPA logs', error: err.message });
+  }
+});
+
+// Endpoint to log RPA activities
+app.post('/api/log-rpa-activity', async (req, res) => {
+  try {
+    const { action, user, contractNumber, status, details } = req.body;
+    
+    // Extract additional info from request
+    const ipAddress = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for'];
+    const userAgent = req.get('user-agent');
+    
+    const logEntry = {
+      timestamp: new Date(),
+      action,
+      user: user || 'System',
+      contractNumber: contractNumber || null,
+      status: status || 'Unknown',
+      actionType: action?.toLowerCase().includes('force') ? 'forceprocess' : 'autoprocess',
+      details: details || {},
+      ipAddress: ipAddress || null,
+      userAgent: userAgent || null
+    };
+
+    if (DATABASE_TYPE === 'mongodb') {
+      // Save to MongoDB RPA logs collection
+      const RPALogModel = mongoose.model('RPALog');
+      const newLog = new RPALogModel(logEntry);
+      await newLog.save();
+      console.log(`[📝 RPA Log] Saved to MongoDB: ${action} - ${contractNumber || 'System'}`);
+    } else {
+      // Save to Firebase rpa_logs collection
+      await db.collection('rpa_logs').add(logEntry);
+      console.log(`[📝 RPA Log] Saved to Firebase: ${action} - ${contractNumber || 'System'}`);
+    }
+
+    res.json({ success: true, message: 'Activity logged successfully' });
+  } catch (err) {
+    console.error('[🔥 log-rpa-activity error]', err);
+    res.status(500).json({ message: 'Failed to log activity', error: err.message });
+  }
+});
+
+// Endpoint to check if the file exists in the 'compare_result' collection
+app.get('/api/check-file-exists', async (req, res) => {
+  try {
+    const { filename } = req.query; // Expect filename as query parameter
+
+    if (!filename) {
+      return res.status(400).json({ message: 'Filename is required' });
+    }
+
+    // Check if the file exists in the 'compare_result' collection
+    const snapshot = await db.collection('compare_result')
+      .where('contract_number', '==', filename)
+      .get();
+
+    if (!snapshot.empty) {
+      return res.json({ success: true, message: 'File already processed', exists: true });
+    } else {
+      return res.json({ success: false, message: 'File not processed yet', exists: false });
+    }
+  } catch (err) {
+    console.error('[❌ Error checking file existence]', err);
+    res.status(500).json({ message: 'Error checking file existence', error: err.message });
+  }
+});
+
+// New endpoint to check if the file exists in Firebase (compare_result collection)
+// In your server.js (or wherever your Express routes live):
+
+// Bulk delete contracts endpoint
+app.post('/api/delete-contracts', async (req, res) => {
+  try {
+    const { contractNumbers } = req.body;
+    
+    if (!contractNumbers || !Array.isArray(contractNumbers) || contractNumbers.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Please provide an array of contract numbers to delete' 
+      });
+    }
+
+    console.log(`[🗑️ Bulk Delete] Deleting ${contractNumbers.length} contracts:`, contractNumbers);
+    
+    // Filter out null/undefined values
+    const validContractNumbers = contractNumbers.filter(cn => cn != null && cn !== '');
+    if (validContractNumbers.length !== contractNumbers.length) {
+      console.warn(`[⚠️ Bulk Delete] Filtered out ${contractNumbers.length - validContractNumbers.length} invalid contract numbers (null/undefined/empty)`);
+    }
+    
+    if (validContractNumbers.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'No valid contract numbers to delete after filtering' 
+      });
+    }
+
+    // Delete each contract based on database type
+    const deletePromises = validContractNumbers.map(async (contractNumber) => {
+      try {
+        if (dbAdapter.type === 'mongodb') {
+          // For MongoDB, delete from Documents collection
+          const DocumentModel = mongoose.model('Document');
+          const result = await DocumentModel.deleteOne({ filename: contractNumber });
+          
+          if (result.deletedCount > 0) {
+            console.log(`[✅] Deleted contract from MongoDB: ${contractNumber}`);
+            return { contractNumber, success: true };
+          } else {
+            console.log(`[⚠️] Contract not found in MongoDB: ${contractNumber}`);
+            return { contractNumber, success: false, error: 'Document not found' };
+          }
+        } else {
+          // For Firebase
+          await db.collection('compare_result').doc(contractNumber).delete();
+          // Also delete from lead_statuses collection if exists
+          await db.collection('lead_statuses').doc(contractNumber).delete();
+          
+          console.log(`[✅] Deleted contract from Firebase: ${contractNumber}`);
+          return { contractNumber, success: true };
+        }
+      } catch (error) {
+        console.error(`[❌] Failed to delete contract ${contractNumber}:`, error);
+        return { contractNumber, success: false, error: error.message };
+      }
+    });
+
+    const results = await Promise.all(deletePromises);
+    
+    const successCount = results.filter(r => r.success).length;
+    const failedCount = results.filter(r => !r.success).length;
+    const skippedCount = contractNumbers.length - validContractNumbers.length;
+
+    console.log(`[🗑️ Bulk Delete Complete] Success: ${successCount}, Failed: ${failedCount}, Skipped: ${skippedCount}`);
+
+    let message = `Deleted ${successCount} contract(s)`;
+    if (failedCount > 0) message += `, ${failedCount} failed`;
+    if (skippedCount > 0) message += `, ${skippedCount} skipped (invalid IDs)`;
+    
+    res.json({ 
+      success: true, 
+      message,
+      results,
+      successCount,
+      failedCount,
+      skippedCount
+    });
+  } catch (err) {
+    console.error('[❌ Bulk Delete Error]', err);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to delete contracts', 
+      error: err.message 
+    });
+  }
+});
+
+app.get('/api/check-file-processed', async (req, res) => {
+  const { filename } = req.query; // e.g. "5036_LO2502_00060.pdf"
+
+  if (!filename) {
+    return res.status(400).json({ message: 'Filename is required' });
+  }
+
+  // ── 0) Strip “.pdf” (if present) so our regex can match just the contract number ──
+  const baseName = filename.replace(/\.pdf$/i, '');
+
+  // ── 1) Now test: must be digits + "_" + (LO|LR) + digits + "_" + digits ──
+  // e.g. "5036_LO2502_00060"
+  const validPattern = /^\d+_(?:LO|LR)\d+_\d+$/;
+  if (!validPattern.test(baseName)) {
+    // Skip anything that does NOT conform. Return processed:true so caller won’t wait.
+    return res.json({ success: true, processed: true });
+  }
+
+  try {
+    // 2) We know baseName matches “5036_LO2502_00060”
+    const contractNumber = baseName; // already has no ".pdf"
+
+    // 3) Fetch from Firestore under “compare_result/{contractNumber}”
+    const docSnapshot = await db
+      .collection('compare_result')
+      .doc(contractNumber)
+      .get();
+
+    if (!docSnapshot.exists) {
+      // no document → not yet processed
+      return res.json({ success: true, processed: false });
+    }
+
+    // 4) Document exists: grab the three arrays
+    const data = docSnapshot.data();
+    const compareArr = Array.isArray(data.compare_result) ? data.compare_result : null;
+    const webValArr = Array.isArray(data.web_validation_result) ? data.web_validation_result : null;
+    const pdfValArr = Array.isArray(data.validation_result) ? data.validation_result : null;
+
+    if (!compareArr || !webValArr || !pdfValArr) {
+      // any missing → not fully done
+      return res.json({ success: true, processed: false });
+    }
+
+    // 5) Check that every row in compare_result has match === true
+    const allCompareMatch = compareArr.every(row => row.match === true);
+    // 6) Check that every row in web_validation_result has valid === true
+    const allWebValid = webValArr.every(row => row.valid === true);
+    // 7) Check that every row in validation_result has valid === true
+    const allPdfValid = pdfValArr.every(row => row.valid === true);
+
+    const fullyPassed = allCompareMatch && allWebValid && allPdfValid;
+    return res.json({ success: true, processed: fullyPassed });
+  } catch (error) {
+    console.error('[❌ Error in /api/check-file-processed]', error);
+    return res.status(500).json({
+      message: 'Error checking file processed status',
+      error: error.message,
+    });
+  }
+});
+
+app.post('/api/process-sharepoint-folder', async (req, res) => {
+  const { folderUrl } = req.body;
+
+  try {
+    const files = await fetchFilesFromSharePoint(folderUrl); // Implement this function
+    const newContracts = [];
+
+    for (const file of files) {
+      const contractNumber = path.basename(file.name, '.pdf');
+      const docId = contractNumber.replace(/\//g, '_');
+
+      const docExists = await db.collection('compare_result').doc(docId).get();
+      if (docExists.exists) {
+        console.log(`✅ Skipping already-processed contract: ${contractNumber}`);
+        continue;
+      }
+
+      const fileBuffer = await downloadSharePointFile(file.downloadUrl); // implement this
+
+      const tempFilePath = path.join(__dirname, 'uploads', `${contractNumber}.pdf`);
+      fs.writeFileSync(tempFilePath, fileBuffer);
+
+      newContracts.push({ contractNumber, tempFilePath });
+    }
+
+    res.json({ success: true, contracts: newContracts });
+  } catch (err) {
+    console.error('[SharePoint Processing Error]', err);
+    res.status(500).json({ message: 'Failed to fetch files from SharePoint', error: err.message });
+  }
+});
+
+
+import { processOneContract } from './autoProcessor.js';
+// axios already imported at top of file
+import SequentialProcessor from './sequentialProcessor.js';
+import PromptManager from './promptManager.js';
+
+
+app.post('/api/auto-process-pdf-folder', async (req, res) => {
+  const FOLDER_PATH = path.join(__dirname, 'contracts');
+  
+  // Check if contracts folder exists, create if not
+  if (!fs.existsSync(FOLDER_PATH)) {
+    fs.mkdirSync(FOLDER_PATH, { recursive: true });
+    console.log(`[📁 Folder Created] ${FOLDER_PATH}`);
+  }
+  
+  const files = fs.readdirSync(FOLDER_PATH).filter(f => f.toLowerCase().endsWith('.pdf'));
+  const promptKey = req.body.promptKey || 'LOI_permanent_fixed_fields';
+
+  // ✅ Use only the date for folder name
+  const now = new Date();
+  const dateOnly = now.toISOString().split('T')[0]; // e.g., '2025-05-10'
+  const OUTPUT_BASE = path.join(process.cwd(), 'processed', dateOnly);
+  const SKIPPED_FOLDER = path.join(OUTPUT_BASE, 'skipped');
+
+  if (!fs.existsSync(SKIPPED_FOLDER)) {
+    fs.mkdirSync(SKIPPED_FOLDER, { recursive: true });
+    console.log(`[📁 Folder Created] ${SKIPPED_FOLDER}`);
+  }
+
+  if (!files.length) {
+    return res.status(200).json({ success: false, message: 'No files to process.' });
+  }
+
+  let processedCount = 0;
+
+  // Log auto-process start
+  try {
+    await axios.post(`${API_URL}/api/log-rpa-activity`, {
+      action: 'Auto Process Started',
+      user: 'System',
+      contractNumber: null,
+      status: 'Processing',
+      details: { 
+        totalFiles: files.length,
+        promptKey,
+        startedAt: new Date()
+      }
+    });
+  } catch (logErr) {
+    console.warn('Failed to log auto-process start:', logErr.message);
+  }
+
+  for (const file of files) {
+    const fileNameWithoutExtension = path.basename(file, '.pdf');
+    const validPattern = /^\d+_(?:LO|LR)\d+_\d+$/;
+    if (!validPattern.test(fileNameWithoutExtension)) {
+      console.log(`[⏭️  Skipping invalid filename] ${fileNameWithoutExtension}`);
+
+      
+
+      // Don’t process this one—go to the next file
+      continue;
+    }
+
+    const alreadyProcessed = await checkIfFileExistsInFirebase(fileNameWithoutExtension);
+
+    if (alreadyProcessed) {
+      console.log(`[❌ Skipping] ${fileNameWithoutExtension} has already been processed.`);
+      continue;
+    }
+
+    console.log(`[📄 Processing] ${fileNameWithoutExtension}`);
+    
+    // Log individual contract processing
+    try {
+      await axios.post(`${API_URL}/api/log-rpa-activity`, {
+        action: 'Contract Processing',
+        user: 'System',
+        contractNumber: fileNameWithoutExtension,
+        status: 'Processing',
+        details: { 
+          fileName: file,
+          promptKey
+        }
+      });
+    } catch (logErr) {
+      console.warn('Failed to log contract processing:', logErr.message);
+    }
+    
+    await processOneContract(file, promptKey);
+    processedCount++;
+    
+    // Log successful processing
+    try {
+      await axios.post(`${API_URL}/api/log-rpa-activity`, {
+        action: 'Contract Processed',
+        user: 'System',
+        contractNumber: fileNameWithoutExtension,
+        status: 'Success',
+        details: { 
+          fileName: file,
+          processedAt: new Date(),
+          promptKey
+        }
+      });
+    } catch (logErr) {
+      console.warn('Failed to log contract processed:', logErr.message);
+    }
+
+    console.log('[⏳] Waiting for 90 seconds before processing the next file...');
+    await new Promise(resolve => setTimeout(resolve, 90000));
+  }
+
+  // Log auto-process completion
+  try {
+    await axios.post(`${API_URL}/api/log-rpa-activity`, {
+      action: 'Auto Process Completed',
+      user: 'System',
+      contractNumber: null,
+      status: 'Success',
+      details: { 
+        totalProcessed: processedCount,
+        completedAt: new Date(),
+        promptKey
+      }
+    });
+  } catch (logErr) {
+    console.warn('Failed to log auto-process completion:', logErr.message);
+  }
+
+  return res.json({ success: true, processedCount, message: 'Processing completed.' });
+});
+
+
+
+// Function to check if the file exists in the Firebase 'compare_result' collection
+async function checkIfFileExistsInFirebase(filename) {
+  const contractNumber = filename.replace(/\.pdf$/, '');
+  const filePath = path.join(FOLDER_PATH, `${contractNumber}.pdf`);
+  const docId = contractNumber.replace(/\//g, '_');
+
+  try {
+    // ✅ STEP 1: Check if exists in compare_result
+    console.log(`[STEP 1] 🔍 Checking if ${docId} exists in compare_result...`);
+    const existingDoc = await db.collection('compare_result').doc(docId).get();
+
+    if (existingDoc.exists) {
+      console.log(`[✅ STEP 1: Found] ${contractNumber} exists in compare_result.`);
+
+      // ✅ STEP 2: Compare modified timestamp
+      console.log(`[STEP 2] 🕒 Comparing modified time for ${contractNumber}...`);
+      const fileModifiedTime = fs.statSync(filePath).mtime;
+
+      const timestampRes = await axios.get('http://localhost:5001/api/check-file-timestamp', {
+        params: { filename: contractNumber },
+      });
+
+      const { exists, updatedAt } = timestampRes.data;
+
+      if (exists && updatedAt) {
+        const firebaseDate = new Date(updatedAt);
+        console.log(`[STEP 2] 🔄 File modified: ${fileModifiedTime.toISOString()} vs Firebase: ${firebaseDate.toISOString()}`);
+
+        if (firebaseDate >= fileModifiedTime) {
+          console.log(`[❌ Skipping] Firebase timestamp is newer or equal. ${contractNumber} already processed.`);
+          return true;
+        } else {
+          console.log(`[⚠️ STEP 2: Firebase is older] Proceeding to check contract status.`);
+        }
+      } else {
+        console.log(`[⚠️ STEP 2: No timestamp] Proceeding to check contract status.`);
+      }
+    } else {
+      console.log(`[✅ STEP 1: Not found] ${contractNumber} not yet in compare_result. Skipping timestamp check.`);
+    }
+
+    // ✅ STEP 3: Check Simplicity contract status
+    console.log(`[STEP 3] 📄 Checking Simplicity status for ${contractNumber}...`);
+    const statusRes = await axios.post('http://localhost:5001/api/check-contract-status', { contractNumber });
+    const contractStatus = statusRes.data?.status || '';
+
+    console.log(`[STEP 3] 🔍 Contract status = "${contractStatus}"`);
+
+    console.log(`[✅ PASSED] ${contractNumber} ready for processing.`);
+    return false;
+  } catch (error) {
+    console.error(`[❌ ERROR] ${contractNumber}:`, error.message);
+    return false; // Fail-safe: continue processing
+  }
+}
+
+app.post('/api/update-verified-status', async (req, res) => {
+  const { contractNumber, verifiedStatus } = req.body;
+  if (!contractNumber || !verifiedStatus) {
+    return res.status(400).json({ message: 'Missing fields' });
+  }
+
+  try {
+    const docId = contractNumber.replace(/\//g, '_');
+    await db.collection('compare_result').doc(docId).set(
+      { verified_status: verifiedStatus },
+      { merge: true }
+    );
+    console.log(`[Firebase] Set verified_status="${verifiedStatus}" for ${docId}`);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('[Firestore Error] update-verified-status:', err);
+    return res.status(500).json({ message: err.message });
+  }
+});
+
+
+app.post('/api/check-contract-status', async (req, res) => {
+  // 1) Read `contractNumber` explicitly from req.body
+  const contractNumber = req.body.contractNumber;
+  if (!contractNumber) {
+    return res.status(400).json({ message: 'Missing contractNumber' });
+  }
+  const validPattern = /^\d+_(?:LO|LR)\d+_\d+$/;
+  if (!validPattern.test(contractNumber)) {
+    // Return “processed” right away so the caller won’t launch Puppeteer
+    return res.json({
+      success: true,
+      status: null,
+      message: 'Skipped: invalid filename format'
+    });
+  }
+
+  try {
+    const systemType = 'simplicity';
+    let browser, page;
+
+    // Hoist these selectors so both login branches can use them
+    const continueSel1 = '#root > div > div > div.sc-dymIpo.izSiFn > div.withConditionalBorder.sc-bnXvFD.izlagV > div.sc-jzgbtB.bIuYUf > form > div > div:nth-child(3) > div > button';
+    const continueSel2 = '#root > div > div > div.sc-dymIpo.izSiFn > div.withConditionalBorder.sc-bnXvFD.izlagV > div.sc-jzgbtB.bIuYUf > form > div > div:nth-child(4) > div > button';
+
+    // ─── 1) LOGIN OR RELOAD ─────────────────────────────────────────────────────────────
+    if (!browserSessions.has(systemType)) {
+      // Fresh login
+      console.log('[STEP] launching browser/session');
+      browser = await puppeteer.launch({ 
+        headless: false,
+        protocolTimeout: 300000 // 5 minutes timeout
+      });
+      page = await browser.newPage();
+      page.setDefaultTimeout(0); // Disable all timeouts
+      page.setDefaultNavigationTimeout(0); // Disable navigation timeouts
+
+      console.log('[STEP] going to apptop.aspx');
+      await page.goto('https://mall-management.lotuss.com/Simplicity/apptop.aspx', { waitUntil: 'networkidle2' });
+
+      console.log('[STEP] waiting for "go to login" button');
+      await page.waitForSelector('#lblToLoginPage', { visible: true, timeout: 20000 });
+      console.log('[STEP] clicking "go to login"');
+      await page.click('#lblToLoginPage');
+
+      console.log('[STEP] waiting 5s for username form');
+      await new Promise(r => setTimeout(r, 5000));
+
+      console.log('[STEP] typing username');
+      await page.waitForSelector('input#username', { visible: true, timeout: 20000 });
+      await page.type('input#username', 'john.pattanakarn@lotuss.com', { delay: 50 });
+      await page.waitForSelector(continueSel1, { visible: true, timeout: 20000 });
+      console.log('[STEP] clicking username Continue');
+      await page.click(continueSel1);
+
+      console.log('[STEP] waiting 5s for password form');
+      await new Promise(r => setTimeout(r, 5000));
+
+      console.log('[STEP] typing password');
+      await page.waitForSelector('input#password', { visible: true, timeout: 20000 });
+      await page.type('input#password', 'Gofresh@0725-19', { delay: 50 });
+      await page.waitForSelector(continueSel2, { visible: true, timeout: 20000 });
+      console.log('[STEP] clicking password Continue');
+      await page.click(continueSel2);
+
+      console.log('[STEP] waiting 15s for post-login settle');
+      await new Promise(r => setTimeout(r, 15000));
+
+      console.log('[STEP] verifying login succeeded');
+      const html = await page.content();
+      if (html.includes('Invalid login')) {
+        console.log('[ERROR] Invalid credentials');
+        await browser.close();
+        return res.status(401).json({ message: 'Invalid credentials' });
+      }
+
+      console.log('[STEP] storing session');
+      browserSessions.set(systemType, { browser, page });
+
+    } else {
+      // Reuse or fallback login
+      console.log('[STEP] reusing existing session');
+      try {
+        ({ browser, page } = browserSessions.get(systemType));
+
+        // Close any extra tabs/popups so we start fresh
+        const pagesNow = await browser.pages();
+        for (let i = 1; i < pagesNow.length; i++) {
+          try { await pagesNow[i].close(); } catch {}
+        }
+
+        // Reload the landing page to clear old iframes/state
+        await page.goto('https://mall-management.lotuss.com/Simplicity/apptop.aspx', { waitUntil: 'networkidle2' });
+        await page.waitForTimeout(2000);
+
+      } catch (reuseErr) {
+        console.warn('[WARN] Existing session invalid, clearing and re-logging in:', reuseErr.message);
+        browserSessions.delete(systemType);
+
+        // Fallback to fresh login logic
+        console.log('[STEP] launching browser/session');
+        browser = await puppeteer.launch({ 
+          headless: false,
+          protocolTimeout: 300000 // 5 minutes timeout
+        });
+        page = await browser.newPage();
+        page.setDefaultTimeout(0); // Disable all timeouts
+        page.setDefaultNavigationTimeout(0); // Disable navigation timeouts
+
+        console.log('[STEP] going to apptop.aspx');
+        await page.goto('https://mall-management.lotuss.com/Simplicity/apptop.aspx', { waitUntil: 'networkidle2' });
+
+        console.log('[STEP] waiting for "go to login" button');
+        await page.waitForSelector('#lblToLoginPage', { visible: true, timeout: 20000 });
+        console.log('[STEP] clicking "go to login"');
+        await page.click('#lblToLoginPage');
+
+        console.log('[STEP] waiting 5s for username form');
+        await new Promise(r => setTimeout(r, 5000));
+
+        console.log('[STEP] typing username');
+        await page.waitForSelector('input#username', { visible: true, timeout: 20000 });
+        await page.type('input#username', 'john.pattanakarn@lotuss.com', { delay: 50 });
+        await page.waitForSelector(continueSel1, { visible: true, timeout: 20000 });
+        console.log('[STEP] clicking username Continue');
+        await page.click(continueSel1);
+
+        console.log('[STEP] waiting 5s for password form');
+        await new Promise(r => setTimeout(r, 5000));
+
+        console.log('[STEP] typing password');
+        await page.waitForSelector('input#password', { visible: true, timeout: 20000 });
+        await page.type('input#password', 'Gofresh@0725-19', { delay: 50 });
+        await page.waitForSelector(continueSel2, { visible: true, timeout: 20000 });
+        console.log('[STEP] clicking password Continue');
+        await page.click(continueSel2);
+
+        console.log('[STEP] waiting 15s for post-login settle');
+        await new Promise(r => setTimeout(r, 15000));
+
+        console.log('[STEP] verifying login succeeded');
+        const html2 = await page.content();
+        if (html2.includes('Invalid login')) {
+          console.log('[ERROR] Invalid credentials');
+          await browser.close();
+          return res.status(401).json({ message: 'Invalid credentials' });
+        }
+
+        console.log('[STEP] storing session');
+        browserSessions.set(systemType, { browser, page });
+      }
+    }
+
+    // Small buffer before interacting
+    await new Promise(r => setTimeout(r, 10000));
+
+    // ─── STATUS CHECK ────────────────────────────────────────────────────────
+    console.log('[STEP] clicking Lease menu');
+    await page.click('#menu_MenuLiteralDiv > ul > li:nth-child(10) > a');
+    console.log('[STEP] hovering Lease submenu');
+    await new Promise(r => setTimeout(r, 5000));
+    await page.evaluate(() => {
+      const leaseMenu = [...document.querySelectorAll('a')].find(el => el.textContent.trim() === 'Lease');
+      leaseMenu?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    });
+    await new Promise(r => setTimeout(r, 10000));
+
+    // Decide Offer vs Renewal
+    const isLeaseOffer = contractNumber.includes('LO');
+    const submenuText = isLeaseOffer ? 'Lease Offer' : 'Lease Renewal';
+    console.log(`[STEP] clicking submenu "${submenuText}"`);
+    
+    // Use robust retry mechanism for clicking submenu
+    await robustClickSubmenu(page, submenuText, contractNumber);
+    await new Promise(r => setTimeout(r, 5000));
+
+    console.log('[STEP] waiting for search iframe');
+    const iframeHandle = await robustWaitForElement(page, 'iframe[name="frameBottom"]', 20000);
+    const frame = await iframeHandle.contentFrame();
+    if (!frame) throw new Error('Could not get contentFrame()');
+
+    console.log('[STEP] waiting for search input inside iframe (up to 50 s)…');
+    let searchFound = false;
+    try {
+      await frame.waitForSelector('#panel_SimpleSearch_c1', { visible: true, timeout: 50000 });
+      searchFound = true;
+    } catch (cssErr) {
+      console.warn('[WARN] CSS selector not found after 50s:', cssErr.message);
+      try {
+        await frame.waitForXPath('//*[@id="panel_SimpleSearch_c1"]', { visible: true, timeout: 10000 });
+        searchFound = true;
+      } catch {}
+    }
+
+    if (!searchFound) {
+      console.error('[ERROR] Search box not found; skipping status check.');
+      return res.json({
+        success: true,
+        status: null,
+        message: 'Search box not found; cannot extract workflow status at this time.'
+      });
+    }
+
+    console.log('[STEP] entering contract number');
+    await frame.evaluate((cn) => {
+      const inp = document.querySelector('#panel_SimpleSearch_c1');
+      if (inp) {
+        inp.value = cn;
+        inp.focus();
+      }
+    }, contractNumber);
+
+    console.log('[STEP] clicking search button');
+    await frame.evaluate(() => document.querySelector('a#panel_buttonSearch_bt')?.click());
+    await new Promise(r => setTimeout(r, 5000));
+
+    console.log('[STEP] extracting status cell');
+    const statusXPath = isLeaseOffer
+      ? '//*[@id="gridResults_gv"]/tbody/tr[2]/td[13]'
+      : '//*[@id="gridResults_gv"]/tbody/tr[2]/td[12]';
+    const statusText = await frame.evaluate(xpath => {
+      const result = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+      return result.singleNodeValue?.textContent.trim() || null;
+    }, statusXPath);
+
+    console.log(`[RESULT] ${contractNumber} → "${statusText}"`);
+    return res.json({ success: true, status: statusText });
+
+  } catch (err) {
+    console.error('[ERROR] Contract status check failed:', err);
+    return res.status(500).json({ message: 'Failed to check contract status', error: err.message });
+  }
+});
+
+app.get('/api/list-directories', async (req, res) => {
+  try {
+    const requested = req.query.path || '';
+    console.log('list-directories requested path:', requested);
+    
+    let fullPath;
+    
+    if (!requested) {
+      // Root level - show the two main folders
+      fullPath = __dirname; // server directory
+    } else {
+      // Handle paths like 'server/processed' by using the parent directory
+      if (requested.startsWith('server/')) {
+        // Remove 'server/' prefix since we're already in the server directory
+        const relativePath = requested.substring(7);
+        fullPath = path.join(__dirname, relativePath);
+      } else {
+        fullPath = path.join(__dirname, requested);
+      }
+    }
+    
+    console.log('list-directories full path:', fullPath);
+    
+    // Security check
+    if (!fullPath.startsWith(__dirname)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    const items = await fs.promises.readdir(fullPath, { withFileTypes: true });
+    const entries = items.map(dirent => ({
+      name: dirent.name,
+      isDirectory: dirent.isDirectory(),
+    }));
+    
+    console.log('list-directories entries found:', entries.length);
+    res.json({ entries });
+  } catch (err) {
+    console.error('list-directories error:', err);
+    res.status(500).json({ message: 'Unable to list directory', error: err.message });
+  }
+});
+
+// List directory (singular) - alias for list-directories for compatibility
+app.get('/api/list-directory', async (req, res) => {
+  try {
+    const requested = req.query.path || '';
+    console.log('list-directory requested path:', requested);
+    
+    let fullPath;
+    
+    if (!requested) {
+      fullPath = __dirname;
+    } else {
+      if (requested.startsWith('server/')) {
+        const relativePath = requested.substring(7);
+        fullPath = path.join(__dirname, relativePath);
+      } else {
+        fullPath = path.join(__dirname, requested);
+      }
+    }
+    
+    console.log('list-directory full path:', fullPath);
+    
+    // Security check
+    if (!fullPath.startsWith(__dirname)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    const items = await fs.promises.readdir(fullPath, { withFileTypes: true });
+    const entries = items.map(dirent => ({
+      name: dirent.name,
+      isDirectory: dirent.isDirectory(),
+    }));
+    
+    res.json({ entries });
+  } catch (err) {
+    console.error('list-directory error:', err);
+    res.status(500).json({ message: 'Unable to list directory', error: err.message });
+  }
+});
+
+// List the files in a folder
+app.get('/api/list-files', async (req, res) => {
+  const folder = req.query.folder;
+  if (!['contracts','processed'].includes(folder)) {
+    return res.status(400).json({ error: 'Invalid folder' });
+  }
+
+  // resolve relative to this file’s directory (safer than process.cwd())
+  const dir = path.join(__dirname, folder);
+
+  try {
+    const files = await fsPromises.readdir(dir);
+    const pdfs  = files.filter(f => f.toLowerCase().endsWith('.pdf'));
+    res.json({ files: pdfs });
+  } catch (err) {
+    console.error('list-files error', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+// The /api/check-file-exists endpoint in your server (if not added already)
+app.get('/api/check-file-exists', async (req, res) => {
+  try {
+    const { filename } = req.query; // Expect filename as query parameter
+
+    if (!filename) {
+      return res.status(400).json({ message: 'Filename is required' });
+    }
+
+    // Check if the file exists in the 'compare_result' collection
+    const snapshot = await db.collection('compare_result')
+      .where('contract_number', '==', filename)  // Use the contract number without .pdf
+      .get();
+
+    if (!snapshot.empty) {
+      return res.json({ success: true, message: 'File already processed', exists: true });
+    } else {
+      return res.json({ success: false, message: 'File not processed yet', exists: false });
+    }
+  } catch (err) {
+    console.error('[❌ Error checking file existence]', err);
+    res.status(500).json({ message: 'Error checking file existence', error: err.message });
+  }
+});
+
+app.get('/api/check-file-timestamp', async (req, res) => {
+  try {
+    const { filename } = req.query;
+
+    if (!filename) {
+      return res.status(400).json({ message: 'Filename (contract number) is required' });
+    }
+
+    let doc, updatedAt;
+    
+    if (dbAdapter.type === 'mongodb') {
+      // For MongoDB
+      const DocumentModel = mongoose.model('Document');
+      const mongoDoc = await DocumentModel.findOne({ 
+        $or: [
+          { filename: filename },
+          { contractNumber: filename }
+        ]
+      });
+      
+      if (!mongoDoc) {
+        return res.status(200).json({
+          success: false,
+          exists: false,
+          message: 'No matching document found'
+        });
+      }
+      
+      doc = mongoDoc.extractedData || {};
+      updatedAt = mongoDoc.updatedAt;
+    } else {
+      // For Firebase
+      const snapshot = await db.collection('compare_result')
+        .where('contract_number', '==', filename)
+        .limit(1)
+        .get();
+
+      if (snapshot.empty) {
+        return res.status(200).json({
+          success: false,
+          exists: false,
+          message: 'No matching document found'
+        });
+      }
+
+      doc = snapshot.docs[0].data();
+      updatedAt = doc.updated_at?.seconds
+        ? new Date(doc.updated_at.seconds * 1000)
+        : (doc.updated_at ? new Date(doc.updated_at) : null);
+    }
+
+    if (!updatedAt) {
+      return res.status(200).json({
+        success: true,
+        exists: true,
+        updatedAt: null,
+        message: 'Document found, but no updated_at field'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      exists: true,
+      updatedAt: updatedAt.toISOString(),
+      message: 'Timestamp fetched successfully'
+    });
+  } catch (err) {
+    console.error('[❌ Error in /api/check-file-timestamp]', err);
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: err.message
+    });
+  }
+});
+
+
+app.post('/api/update-workflow-status', async (req, res) => {
+  const { contractNumber, workflowStatus } = req.body;
+  if (!contractNumber || !workflowStatus) {
+    return res.status(400).json({ success: false, message: 'Missing contractNumber or workflowStatus' });
+  }
+
+  try {
+    const docId = contractNumber.replace(/\//g, '_');
+    await db.collection('compare_result').doc(docId).set(
+      { workflow_status: workflowStatus },
+      { merge: true }
+    );
+    console.log(`[✅ Firestore] workflow_status for ${docId} set to "${workflowStatus}"`);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error(`[❌ Failed to update workflow_status for ${contractNumber}]:`, err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+
+
+app.post('/api/contract-classify', async (req, res) => {
+  try {
+    const { ocrText } = req.body;
+    if (!ocrText) return res.status(400).json({ error: 'Missing OCR text' });
+
+    const classifyPromptPath = path.join(__dirname, 'prompts', 'LOI_classify_prompt.txt');
+    const promptTemplate = fs.readFileSync(classifyPromptPath, 'utf-8');
+
+    // Limit text to first 10,000 characters (approximately pages 1-5) for classification
+    const limitedText = ocrText.substring(0, 10000);
+    console.log(`[📄 Contract Classification] Using first ${limitedText.length} characters out of ${ocrText.length} total`);
+    
+    const fullPrompt = `${promptTemplate.trim()}\n\n${limitedText.trim()}`;
+
+    // Use Lotus LLM API instead of Gemini
+    const LOTUS_LLM_URL = 'https://api-cpxis.lotuss.com/llm/v1/chat/completions';
+    const LOTUS_API_KEY = 'accounting.lotuss.F51DAF28FD6422DDF3CD864F833CC';
+
+    let text;
+    let attempt = 1;
+    const maxAttempts = 5;
+    
+    while (attempt <= maxAttempts) {
+      try {
+        console.log(`[🔄 Attempting contract classification with Lotus LLM - attempt ${attempt}]`);
+        
+        const response = await axios.post(LOTUS_LLM_URL, {
+          model: 'default',
+          messages: [
+            {
+              role: 'system',
+              content: 'You are a contract classification assistant. Always respond with valid JSON only.'
+            },
+            {
+              role: 'user',
+              content: fullPrompt
+            }
+          ],
+          temperature: 0.1,
+          max_tokens: 1500, // Increased for thinking mode responses
+        }, {
+          headers: {
+            'Authorization': `Bearer ${LOTUS_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 0 // No timeout - wait indefinitely
+        });
+
+        // Handle new API response format where content might be in reasoning_content
+        const messageContent = response.data.choices[0].message.content;
+        const reasoningContent = response.data.choices[0].message.reasoning_content;
+        text = messageContent || reasoningContent;
+        console.log('[✅ Contract classification Lotus LLM API call successful]');
+        break;
+      } catch (fetchError) {
+        console.warn(`[⚠️ Contract classification attempt ${attempt} failed]`, fetchError.message);
+        
+        // Fallback: Use rule-based classification when Lotus LLM is unavailable (503/502) or bad request (400)
+        if (fetchError.response && (fetchError.response.status === 503 || fetchError.response.status === 502 || fetchError.response.status === 400)) {
+          console.log(`[🔄 Lotus LLM error (${fetchError.response.status}), using fallback rule-based classification]`);
+          
+          // Simple rule-based classification based on content patterns
+          const content = fullPrompt.toLowerCase();
+          let contractType = 'permanent_fixed'; // default
+          
+          // Check for service express indicators
+          if (content.includes('service express') || content.includes('service_express') || 
+              content.includes('monthly service') && content.includes('short term')) {
+            contractType = 'service_express';
+          }
+          
+          console.log('[✅ Fallback classification completed]', { contractType });
+          return res.json({ contractType });
+        }
+        
+        // Wait before retry (exponential backoff with cap)
+        const waitTime = Math.min(1000 * Math.pow(2, Math.min(attempt - 1, 6)), 60000); // Cap at 60 seconds
+        console.log(`[⏳ Contract classification waiting ${waitTime}ms before retry...]`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+      }
+      
+      attempt++;
+    }
+
+    // Handle successful LLM response
+    if (text) {
+      console.log('[Contract Classification] Original LLM response length:', text.length);
+      console.log('[Contract Classification] Original LLM response preview:', text.substring(0, 300));
+      
+      // First strip think tags
+      const cleanedText = stripThinkTags(text);
+      console.log('[Contract Classification] After stripThinkTags length:', cleanedText.length);
+      
+      // Clean and parse LLM response
+      let raw = cleanedText.trim();
+      
+      // Try to extract valid JSON using the same logic as stripThinkTags
+      const validJson = extractValidJson(raw);
+      if (validJson) {
+        raw = validJson;
+      } else {
+        // Fallback to manual cleaning
+        if (raw.startsWith('```json')) raw = raw.slice(7);
+        if (raw.endsWith('```')) raw = raw.slice(0, -3);
+      }
+
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (parseError) {
+        console.error('[Contract Classification] JSON parse failed');
+        console.error('[Contract Classification] Raw text length:', raw.length);
+        console.error('[Contract Classification] Raw text preview:', raw.substring(0, 500));
+        console.error('[Contract Classification] Parse error:', parseError.message);
+        
+        // Check if this looks like truncated JSON that we can potentially recover
+        if (parseError.message.includes('Unterminated string') || 
+            parseError.message.includes('Unexpected end of JSON input')) {
+          console.log('[Contract Classification] Attempting recovery from truncated JSON...');
+          
+          // Try to extract contractType from the truncated JSON using regex
+          const contractTypeMatch = raw.match(/"contractType"\s*:\s*"([^"]+)"/);
+          if (contractTypeMatch) {
+            console.log('[Contract Classification] Recovered contractType from truncated JSON:', contractTypeMatch[1]);
+            parsed = { contractType: contractTypeMatch[1] };
+          } else {
+            // If we can't recover contractType, this is a real error
+            throw parseError;
+          }
+        } else {
+          throw parseError;
+        }
+      }
+
+      const contractType = parsed?.contractType?.trim() || parsed?.['Contract Type']?.trim();
+      if (!contractType) {
+        console.error('[Contract Classification] Parsed response:', parsed);
+        throw new Error('No contractType found in LLM output');
+      }
+
+      res.json({ contractType });
+    } else {
+      // This should not happen due to fallback, but just in case
+      console.error('[Contract Classification] No response text available');
+      throw new Error('No classification response available');
+    }
+  } catch (err) {
+    console.error('[❌ Contract Classification Error]', err);
+    
+    // If this is a JSON parsing error and we haven't tried without thinking mode yet,
+    // try one more time with thinking mode disabled for a faster, more reliable response
+    if (err.message.includes('JSON') && !req.body._retryWithoutThinking) {
+      console.log('[🔄 Contract Classification: Retrying with thinking mode disabled]');
+      
+      // Retry the same request with thinking mode disabled
+      req.body._retryWithoutThinking = true;
+      
+      try {
+        // Re-read the prompt template and setup variables for retry
+        const classifyPromptPath = path.join(__dirname, 'prompts', 'LOI_classify_prompt.txt');
+        const promptTemplate = fs.readFileSync(classifyPromptPath, 'utf-8');
+        const LOTUS_LLM_URL = 'https://api-cpxis.lotuss.com/llm/v1/chat/completions';
+        const LOTUS_API_KEY = 'accounting.lotuss.F51DAF28FD6422DDF3CD864F833CC';
+        
+        const retryResponse = await axios.post(LOTUS_LLM_URL, {
+          model: 'default',
+          messages: [
+            {
+              role: 'system',
+              content: 'Return ONLY valid JSON: {"contractType": "permanent_fixed" or "service_express"}'
+            },
+            {
+              role: 'user',
+              content: `${promptTemplate.trim()}\n\n${req.body.ocrText.trim()}`
+            }
+          ],
+          temperature: 0.0, // Deterministic for speed
+          max_tokens: 300, // Minimal tokens for fast classification
+          chat_template_kwargs: {"enable_thinking": false}
+        }, {
+          headers: {
+            'Authorization': `Bearer ${LOTUS_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 120000 // 2 minute timeout for retry
+        });
+        
+        const retryText = retryResponse.data.choices[0].message.content;
+        const retryCleanedText = stripThinkTags(retryText);
+        
+        const retryValidJson = extractValidJson(retryCleanedText);
+        const retryRaw = retryValidJson || retryCleanedText.trim();
+        
+        const retryParsed = JSON.parse(retryRaw);
+        const retryContractType = retryParsed?.contractType?.trim() || retryParsed?.['Contract Type']?.trim();
+        
+        if (retryContractType) {
+          console.log('[✅ Contract Classification: Retry successful]', retryContractType);
+          return res.json({ contractType: retryContractType });
+        }
+      } catch (retryErr) {
+        console.error('[❌ Contract Classification: Retry also failed]', retryErr.message);
+      }
+    }
+    
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// Meter check endpoint for autoProcessor
+app.post('/api/meter-check', async (req, res) => {
+  console.log('[Meter Check] Incoming request to /api/meter-check');
+  const { contractNumber, contractType, unitId, buildingId, utilityChargeElectricity, utilityChargeWater, utilityChargeCookingGas } = req.body;
+
+  if (!contractNumber) {
+    return res.status(400).json({ success: false, message: 'Contract number required' });
+  }
+
+  let browser;
+  try {
+    // Reuse existing browser session or create new one
+    const systemType = 'simplicity';
+    if (browserSessions.has(systemType)) {
+      const session = browserSessions.get(systemType);
+      
+      try {
+        if (!session || !session.browser || typeof session.browser.pages !== 'function') {
+          throw new Error('Browser session invalid');
+        }
+        await session.browser.pages();
+        browser = session.browser;
+      } catch (browserError) {
+        console.warn('[Meter Check] Existing browser session invalid, using existing logic');
+        browserSessions.delete(systemType);
+        return res.status(400).json({ 
+          success: false, 
+          message: 'No active browser session. Please ensure web scraping session is active.' 
+        });
+      }
+    } else {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'No active browser session found. Please run web scraping first.' 
+      });
+    }
+
+    // Find the simplicity popup
+    const pages = await browser.pages();
+    let popup = pages.find(page => page.url().includes('simplicity') || page.url().includes('mall-management'));
+    
+    if (!popup) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'No active Simplicity page found. Please ensure web scraping session is active.' 
+      });
+    }
+
+    console.log('[Meter Check] Using existing popup:', popup.url());
+
+    // Navigate to meter page
+    await popup.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    console.log('[Meter Check] scrolled down');
+    await new Promise(r => setTimeout(r, 2000));
+
+    // Wait a bit to ensure page is ready
+    await new Promise(r => setTimeout(r, 3000));
+    
+    // Click Utility menu (at position 25, not 22)
+    const utilSel = '#menu_MenuLiteralDiv > ul > li:nth-child(25) > a > div.cssmenu-item-label';
+    console.log('[Meter Check] clicking Utility top-menu');
+    
+    try {
+      await popup.waitForSelector(utilSel, { visible: true, timeout: 10000 });
+      await popup.click(utilSel);
+      console.log('[Meter Check] Successfully clicked Utility menu');
+    } catch (utilError) {
+      console.error('[Meter Check] Failed to click Utility menu:', utilError.message);
+      throw new Error(`Failed to click Utility menu: ${utilError.message}`);
+    }
+
+    // Hover to expand submenu
+    console.log('[Meter Check] hovering Utility submenu');
+    await popup.evaluate(() => {
+      const li = document.querySelector('#menu_MenuLiteralDiv > ul > li:nth-child(25)');
+      if (li) {
+        li.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        console.log('[Page] Dispatched mouseover on utility menu');
+      } else {
+        console.log('[Page] Could not find utility menu li element');
+      }
+    });
+    await new Promise(r => setTimeout(r, 5000)); // Wait for submenu to appear
+
+    // Click "Meter" submenu
+    console.log('[Meter Check] clicking Meter submenu');
+    const clickedMeter = await popup.evaluate(() => {
+      const menu = document.querySelector('#menu_MenuLiteralDiv > ul > li:nth-child(25) ul');
+      console.log('[Page] Found submenu container:', !!menu);
+      if (!menu) return false;
+      
+      const allLinks = Array.from(menu.querySelectorAll('a'));
+      console.log('[Page] Found links in submenu:', allLinks.map(a => a.textContent.trim()));
+      
+      const meterLink = allLinks.find(x => x.textContent.trim() === 'Meter');
+      console.log('[Page] Found Meter link:', !!meterLink);
+      
+      if (meterLink) { 
+        meterLink.click(); 
+        return true; 
+      }
+      return false;
+    });
+    
+    if (!clickedMeter) {
+      throw new Error('Could not find or click Meter submenu item');
+    }
+    console.log('[Meter Check] Meter submenu clicked');
+
+    // Wait & switch to bottom iframe
+    await new Promise(r => setTimeout(r, 10000));
+    const frameHandle = await popup.waitForSelector('iframe[name="frameBottom"]', { timeout: 20000 });
+    const frame = await frameHandle.contentFrame();
+   
+    await new Promise(r => setTimeout(r, 10000));
+
+    // Combined Unit ID + Building ID search
+    console.log('[Meter Check] preparing combined Unit ID + Building ID search');
+
+    // Wait for the main search box
+    await frame.waitForSelector('#panel_SimpleSearch_c1', { visible: true, timeout: 20000 });
+
+    // Use the passed Unit ID and Building ID from autoProcessor
+    console.log('[Meter Check] received Unit ID:', unitId);
+    console.log('[Meter Check] received Building ID:', buildingId);
+
+    // Build the combined search string
+    const combinedSearch = buildingId && unitId ? `${unitId} ${buildingId}` : contractNumber.replace(/\//g, '');
+
+    console.log('[Meter Check] entering combined search:', combinedSearch);
+
+    // Clear & type the combined string
+    await frame.click('#panel_SimpleSearch_c1', { clickCount: 3 });
+    await frame.type('#panel_SimpleSearch_c1', combinedSearch, { delay: 50 });
+
+    // Click search button
+    console.log('[Meter Check] clicking Search');
+    await frame.evaluate(() => {
+      const btn = document.querySelector('a#panel_buttonSearch_bt');
+      btn?.click();
+    });
+    await new Promise(r => setTimeout(r, 15000));
+
+    // Scrape meter page content
+    const utilityRaw = await frame.evaluate(() => document.body.innerText);
+    console.log('[Meter Check] scraped meter content, length:', utilityRaw.length);
+
+    // Run meter validation using Lotus LLM
+    const meterPromptPath = path.join(__dirname, 'prompts', 'meter_check.txt');
+    let meterValidation = null;
+    
+    if (fs.existsSync(meterPromptPath)) {
+      const meterTemplate = fs.readFileSync(meterPromptPath, 'utf8');
+      
+      // Add contract type and utility charges info for LO contracts
+      const isLOContract = contractNumber && contractNumber.includes('LO');
+      const contractInfo = isLOContract ? `\n\nCONTRACT_TYPE: LO
+WEB UTILITY CHARGES:
+- Utilities charge (Electricity): ${utilityChargeElectricity || 0}
+- Utilities charge (water): ${utilityChargeWater || 0}  
+- Utilities charge (cooking gas): ${utilityChargeCookingGas || 0}` : '\n\nCONTRACT_TYPE: NON-LO';
+      
+      const meterPrompt = `${meterTemplate}${contractInfo}\n\nMeter page content:\n${utilityRaw}`;
+      console.log('[Meter Check] sending to Lotus LLM with contract info:', contractInfo.replace(/\n/g, ' '));
+      
+      const LOTUS_LLM_URL = 'https://api-cpxis.lotuss.com/llm/v1/chat/completions';
+      const LOTUS_API_KEY = 'accounting.lotuss.F51DAF28FD6422DDF3CD864F833CC';
+      
+      const response = await axios.post(LOTUS_LLM_URL, {
+        model: 'default',
+        messages: [
+          {
+            role: 'user',
+            content: meterPrompt
+          }
+        ],
+        temperature: 0.1,
+        max_tokens: 2000
+      }, {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${LOTUS_API_KEY}`
+        },
+        timeout: 0 // No timeout - wait indefinitely
+      });
+
+      // Handle new API response format where content might be in reasoning_content
+      const messageContent = response.data.choices[0].message.content;
+      const reasoningContent = response.data.choices[0].message.reasoning_content;
+      const meterResponse = (messageContent || reasoningContent).trim();
+      console.log('[Meter Check] Lotus LLM response received');
+
+      try {
+        // Use stripThinkTags to properly handle <think> tags and extract JSON
+        let cleanedResponse = stripThinkTags(meterResponse);
+        
+        console.log('[Meter Check] Attempting to parse:', cleanedResponse.substring(0, 200));
+        meterValidation = JSON.parse(cleanedResponse);
+        console.log('[Meter Check] validation parsed successfully');
+      } catch (parseErr) {
+        console.error('[Meter Check] parse error:', parseErr.message);
+        console.error('[Meter Check] raw response:', meterResponse.substring(0, 500));
+        meterValidation = [{ field: 'Meter Check', value: 'Error', valid: false, reason: 'Failed to parse meter validation response' }];
+        console.log('[Meter Check] Using fallback error array:', meterValidation);
+      }
+    }
+
+    // Save meter validation to Firebase
+    const contractId = contractNumber.replace(/\//g, '_');
+    if (meterValidation) {
+      await db.collection('web_scrape_results').doc(contractId).set({
+        meter_validation_result: meterValidation,
+        utility_raw: utilityRaw,
+        meter_check_timestamp: new Date()
+      }, { merge: true });
+      
+      console.log('[Meter Check] Results saved to Firebase');
+    }
+
+    console.log('[Meter Check] Final meterValidation before response:', meterValidation);
+    console.log('[Meter Check] meterValidation type:', typeof meterValidation);
+    console.log('[Meter Check] meterValidation isArray:', Array.isArray(meterValidation));
+
+    res.json({
+      success: true,
+      meterValidation: meterValidation,
+      message: 'Meter check completed successfully'
+    });
+
+  } catch (err) {
+    console.error('[Meter Check] Error:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Meter check failed',
+      error: err.message
+    });
+  }
+});
+
+app.post('/api/scrape-url-test', async (req, res) => {
+  const { systemType, username, password, contractNumber } = req.body;
+  // fallback if promptKey is missing or empty
+  const promptKey = (req.body.promptKey && req.body.promptKey.trim())
+    ? req.body.promptKey.trim()
+    : 'LOI_permanent_fixed_fields';
+
+  if (!systemType || systemType === 'others') {
+    return res.status(400).json({ success: false, message: 'Invalid systemType' });
+  }
+  if (!username || !password || !contractNumber) {
+    return res.status(400).json({ success: false, message: 'username, password & contractNumber required' });
+  }
+
+  try {
+    // --- LOGIN STEP ---
+    let browser, page;
+    if (browserSessions.has(systemType)) {
+      ({ browser, page } = browserSessions.get(systemType));
+    } else {
+      browser = await puppeteer.launch({ 
+        headless: false,
+        protocolTimeout: 300000 // 5 minutes timeout
+      });
+      page = await browser.newPage();
+      page.setDefaultTimeout(0); // Disable all timeouts
+      page.setDefaultNavigationTimeout(0); // Disable navigation timeouts
+      await page.goto('https://mall-management.lotuss.com/Simplicity/apptop.aspx', { waitUntil: 'networkidle2' });
+
+      await page.waitForSelector('#lblToLoginPage', { timeout: 20000 });
+      await page.click('#lblToLoginPage');
+
+      await page.waitForSelector('input#username', { timeout: 20000 });
+      await page.type('input#username', username, { delay: 50 });
+      const continueSel1 = '#root > div > div > div.sc-dymIpo.izSiFn > div.withConditionalBorder.sc-bnXvFD.izlagV > div.sc-jzgbtB.bIuYUf > form > div > div:nth-child(3) > div > button';
+      await page.waitForSelector(continueSel1, { timeout: 20000 });
+      await page.click(continueSel1);
+
+      await page.waitForSelector('input#password', { timeout: 20000 });
+      await page.type('input#password', password, { delay: 50 });
+      const continueSel2 = '#root > div > div > div.sc-dymIpo.izSiFn > div.withConditionalBorder.sc-bnXvFD.izlagV > div.sc-jzgbtB.bIuYUf > form > div > div:nth-child(4) > div > button';
+      await page.waitForSelector(continueSel2, { timeout: 20000 });
+      await page.click(continueSel2);
+
+      await page.waitForNavigation({ waitUntil: 'networkidle2' }).catch(() => {});
+      await new Promise(r => setTimeout(r, 10000));
+
+      const html = await page.content();
+      if (html.includes('Invalid login')) {
+        await browser.close();
+        return res.status(401).json({ success: false, message: 'Invalid credentials' });
+      }
+      browserSessions.set(systemType, { browser, page });
+    }
+
+    // --- SCRAPE STEP ---
+    await page.waitForSelector('#menu_MenuLiteralDiv > ul > li:nth-child(10) > a', { timeout: 10000 });
+    await page.click('#menu_MenuLiteralDiv > ul > li:nth-child(10) > a');
+    await new Promise(r => setTimeout(r, 500));
+    await page.evaluate(() => {
+      const leaseMenu = [...document.querySelectorAll('a')].find(el => el.textContent.trim() === 'Lease');
+      leaseMenu?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    });
+    await new Promise(r => setTimeout(r, 2000));
+
+    const isOffer = contractNumber.includes('LO');
+    const submenuText = isOffer ? 'Lease Offer' : 'Lease Renewal';
+    
+    // Use robust retry mechanism for clicking submenu
+    await robustClickSubmenu(page, submenuText, contractNumber);
+    await new Promise(r => setTimeout(r, 10000));
+
+    const iframeHandle = await robustWaitForElement(page, 'iframe[name="frameBottom"]', 70000);
+    const frame = await iframeHandle.contentFrame();
+    if (!frame) throw new Error('❌ Could not access iframe content');
+
+    await frame.waitForSelector('#panel_SimpleSearch_c1', { visible: true, timeout: 70000 });
+    await frame.evaluate(cn => {
+      const input = document.querySelector('#panel_SimpleSearch_c1');
+      input.value = cn;
+      input.focus();
+    }, contractNumber);
+
+    await frame.waitForSelector('a#panel_buttonSearch_bt', { visible: true, timeout: 10000 });
+    await frame.evaluate(() => document.querySelector('a#panel_buttonSearch_bt')?.click());
+    await new Promise(r => setTimeout(r, 15000));
+
+    const viewButton = await frame.$('input[src*="view-black-16.png"]');
+    if (!viewButton) throw new Error('❌ View icon not found');
+    await viewButton.click();
+
+    const popupUrlMatch = isOffer ? 'leaseoffer/edit.aspx' : 'leaserenewal/edit.aspx';
+    let popup;
+    for (let i = 0; i < 15; i++) {
+      const pages = await browser.pages();
+      popup = pages.find(p => p.url().includes(popupUrlMatch) && p !== page);
+      if (popup) break;
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    if (!popup) throw new Error('❌ Popup window not found');
+    await popup.bringToFront();
+
+    const panels = [
+      '#panelMonthlyCharge_label',
+      '#panelOtherMonthlyCharge_label',
+      '#panelGTO_label',
+      '#LeaseMeterTypessArea_label',
+      '#panelSecurityDeposit_label',
+      '#panelOneTimeCharge_label'
+    ];
+    await new Promise(r => setTimeout(r, 10000));
+    for (const sel of panels) {
+      try {
+        const collapsed = await popup.$eval(sel, el => el.classList.contains('collapsible-panel-collapsed'));
+        if (collapsed) await popup.click(sel);
+      } catch {}
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
+    const raw = await popup.evaluate(() => document.body.innerText);
+    const promptFile = path.join(__dirname, 'prompts', `${promptKey}.txt`);
+    if (!fs.existsSync(promptFile)) throw new Error(`Prompt ${promptKey} not found`);
+    const template = fs.readFileSync(promptFile, 'utf8');
+    const response = await axios.post(LOTUS_LLM_URL, {
+      model: 'default',
+      messages: [
+        { role: 'system', content: 'You are a helpful assistant that analyzes content and returns only valid JSON.' },
+        { role: 'user', content: `${template}\n\nContent:\n${raw}` }
+      ],
+      temperature: 0.1,
+      max_tokens: 5000,
+      chat_template_kwargs: { enable_thinking: false } // Enable thinking for better reasoning
+    }, {
+      headers: {
+        'Authorization': `Bearer ${LOTUS_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 30000
+    });
+    const lotusText = stripThinkTags(response.data.choices[0].message.content);
+
+    const docId = contractNumber.replace(/\//g, '_');
+    await db.collection('compare_result').doc(docId).set({
+      timestamp: new Date(),
+      contract_number: docId,
+      web_extracted: raw,
+      lotus_output: lotusText,
+      popup_url: popup.url()
+    }, { merge: true });
+
+    return res.json({ success: true, raw, lotusOutput: lotusText, popupUrl: popup.url() });
+  } catch (err) {
+    console.error('[SCRAPE-URL-TEST Error]', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+async function refreshAllVerifiedStatus() {
+  console.log('[⟳] Starting to recompute verified_status for all compare_result documents…');
+
+  try {
+    // 1) Grab every document in the "compare_result" collection
+    const snapshot = await db.collection('compare_result').get();
+
+    if (snapshot.empty) {
+      console.log('[⟳] No documents found in compare_result; nothing to update.');
+      return;
+    }
+
+    // 2) Loop through each doc, compute “Passed” vs “Needs Review”, then write
+    const batch = db.batch(); // use a batch write in case you have many docs
+
+    snapshot.docs.forEach((docSnap) => {
+      const data = docSnap.data();
+      const docRef = docSnap.ref;
+      const docId = docSnap.id; // e.g. "ABC123"
+
+      // a) Pull out compare_result array and validation_result array
+      //    * You can also include web_validation_result if desired, but up to you.
+      const compareArr = Array.isArray(data.compare_result) ? data.compare_result : [];
+      const pdfValArr = Array.isArray(data.validation_result) ? data.validation_result : [];
+      const webValArr = Array.isArray(data.web_validation_result)
+        ? data.web_validation_result
+        : [];
+
+      // b) Compute “all match = true?” and “all valid = true?”
+      const allCompareMatch = compareArr.length > 0 && compareArr.every((row) => row.match === true);
+      const allPdfValid = pdfValArr.length > 0 && pdfValArr.every((row) => row.valid === true);
+      const allWebValid = webValArr.length > 0 && webValArr.every((row) => row.valid === true);
+
+      // c) Decide final “verified” status rule:
+      //    Here we’ll say “Passed” only if all three arrays exist AND every row is true.
+      //    If any array is missing or any row fails, we call it “Needs Review.”
+      let finalStatus = 'Needs Review';
+      if (allCompareMatch && allPdfValid && allWebValid) {
+        finalStatus = 'Passed';
+      }
+
+      // d) Schedule a merge‐write updating “verified_status”
+      batch.set(docRef, { verified_status: finalStatus }, { merge: true });
+      console.log(`   • Doc ${docId}: compare(${allCompareMatch}), pdf(${allPdfValid}), web(${allWebValid}) → "${finalStatus}"`);
+    });
+
+    // 3) Commit in one batch (or split into multiple if > 500 writes)
+    await batch.commit();
+    console.log('[✅] All verified_status fields updated successfully.');
+  } catch (err) {
+    console.error('[❌] Error in refreshAllVerifiedStatus():', err);
+  }
+}
+
+// ===== PDF Tracking Endpoints =====
+import PDFTracker from './pdfTracker.js';
+const pdfTracker = new PDFTracker();
+
+// Get all versions of a contract PDF
+app.get('/api/pdf-versions/:contractNumber', async (req, res) => {
+  try {
+    const { contractNumber } = req.params;
+    const versions = await pdfTracker.findAllVersions(contractNumber);
+    res.json({ 
+      success: true, 
+      contractNumber,
+      versions,
+      count: versions.length 
+    });
+  } catch (error) {
+    console.error('Error finding PDF versions:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to find PDF versions' 
+    });
+  }
+});
+
+// Get all contract numbers (for autocomplete/search)
+app.get('/api/contract-numbers', async (req, res) => {
+  try {
+    const contractNumbers = await pdfTracker.getAllContractNumbers();
+    res.json({ 
+      success: true, 
+      contractNumbers,
+      count: contractNumbers.length 
+    });
+  } catch (error) {
+    console.error('Error getting contract numbers:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to get contract numbers' 
+    });
+  }
+});
+
+// Serve PDF file  
+app.use('/api/pdf', (req, res) => {
+  try {
+    // Get the path after /api/pdf/
+    const fullUrlPath = req.path.substring(1); // Remove leading /
+    const pathParts = fullUrlPath.split('/');
+    const type = pathParts[0]; // 'contracts' or 'processed'
+    const filePath = pathParts.slice(1).join('/'); // Rest of the path
+    let fullPath;
+    
+    if (type === 'contracts') {
+      fullPath = path.join(__dirname, 'contracts', filePath);
+    } else if (type === 'processed') {
+      fullPath = path.join(__dirname, 'processed', filePath);
+    } else {
+      return res.status(400).json({ error: 'Invalid PDF type' });
+    }
+    
+    // Security check - prevent path traversal
+    if (!fullPath.startsWith(path.join(__dirname, type))) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    // Check if file exists
+    if (!fs.existsSync(fullPath)) {
+      return res.status(404).json({ error: 'PDF not found' });
+    }
+    
+    // Set headers for PDF
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${path.basename(fullPath)}"`);
+    
+    // Stream the file
+    const stream = fs.createReadStream(fullPath);
+    stream.pipe(res);
+  } catch (error) {
+    console.error('Error serving PDF:', error);
+    res.status(500).json({ error: 'Failed to serve PDF' });
+  }
+});
+
+// ===== Download Endpoints =====
+// Download individual file
+app.get('/api/download-file', (req, res) => {
+  try {
+    const requestedPath = req.query.path;
+    if (!requestedPath) {
+      return res.status(400).json({ error: 'Path parameter required' });
+    }
+    
+    console.log('download-file requested path:', requestedPath);
+    
+    let filePath;
+    
+    // Handle paths like 'server/processed/file.pdf' by removing 'server/' prefix
+    if (requestedPath.startsWith('server/')) {
+      const relativePath = requestedPath.substring(7);
+      filePath = path.join(__dirname, relativePath);
+    } else {
+      filePath = path.join(__dirname, requestedPath);
+    }
+    
+    console.log('download-file resolved path:', filePath);
+    
+    // Security check - prevent path traversal
+    if (!filePath.startsWith(__dirname)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    // Check if file exists
+    if (!fs.existsSync(filePath)) {
+      console.error('download-file: file not found at', filePath);
+      return res.status(404).json({ error: 'File not found' });
+    }
+    
+    // Download the file
+    res.download(filePath);
+  } catch (error) {
+    console.error('Error downloading file:', error);
+    res.status(500).json({ error: 'Failed to download file' });
+  }
+});
+
+// Download folder as ZIP
+app.get('/api/download-folder', (req, res) => {
+  try {
+    const requestedPath = req.query.path || '';
+    console.log('download-folder requested path:', requestedPath);
+    
+    let folderPath;
+    
+    if (!requestedPath) {
+      folderPath = __dirname;
+    } else {
+      // Handle paths like 'server/processed' by removing 'server/' prefix
+      if (requestedPath.startsWith('server/')) {
+        const relativePath = requestedPath.substring(7);
+        folderPath = path.join(__dirname, relativePath);
+      } else {
+        folderPath = path.join(__dirname, requestedPath);
+      }
+    }
+    
+    console.log('download-folder resolved path:', folderPath);
+    
+    // Security check - prevent path traversal
+    if (!folderPath.startsWith(__dirname)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    // Check if folder exists
+    if (!fs.existsSync(folderPath)) {
+      console.error('download-folder: folder not found at', folderPath);
+      return res.status(404).json({ error: 'Folder not found' });
+    }
+    
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    const folderName = path.basename(folderPath) || 'download';
+    
+    // Create more unique filename for bulk downloads
+    const timestamp = new Date().getTime();
+    const zipFileName = `${folderName}_${timestamp}.zip`;
+    
+    console.log('download-folder: Creating ZIP file:', zipFileName);
+    
+    res.attachment(zipFileName);
+    archive.pipe(res);
+    
+    archive.directory(folderPath, false);
+    
+    archive.on('progress', (progress) => {
+      console.log('download-folder: Archiving progress:', progress.entries.processed, 'files processed');
+    });
+    
+    archive.on('end', () => {
+      console.log('download-folder: Archive finalized successfully for', zipFileName);
+    });
+    
+    archive.on('error', (err) => {
+      console.error('Archiver error:', err);
+      res.status(500).json({ error: 'Failed to create archive' });
+    });
+    
+    archive.finalize();
+    
+  } catch (error) {
+    console.error('Error downloading folder:', error);
+    res.status(500).json({ error: 'Failed to download folder' });
+  }
+});
+
+// Bulk download multiple items into one ZIP
+app.post('/api/download-bulk', (req, res) => {
+  try {
+    const { items, basePath } = req.body;
+    
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'Items array is required' });
+    }
+    
+    console.log('download-bulk requested items:', items);
+    console.log('download-bulk base path:', basePath);
+    
+    // Resolve base path
+    let resolvedBasePath;
+    if (!basePath) {
+      resolvedBasePath = __dirname;
+    } else if (basePath.startsWith('server/')) {
+      const relativePath = basePath.substring(7);
+      resolvedBasePath = path.join(__dirname, relativePath);
+    } else {
+      resolvedBasePath = path.join(__dirname, basePath);
+    }
+    
+    console.log('download-bulk resolved base path:', resolvedBasePath);
+    
+    // Security check
+    if (!resolvedBasePath.startsWith(__dirname)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    const timestamp = new Date().getTime();
+    const zipFileName = `bulk_download_${timestamp}.zip`;
+    
+    console.log('download-bulk: Creating combined ZIP file:', zipFileName);
+    
+    res.attachment(zipFileName);
+    archive.pipe(res);
+    
+    let processedItems = 0;
+    const totalItems = items.length;
+    
+    // Add each item to the archive
+    for (const itemName of items) {
+      const itemPath = path.join(resolvedBasePath, itemName);
+      
+      // Security check for each item
+      if (!itemPath.startsWith(__dirname)) {
+        console.warn('download-bulk: Skipping item due to security check:', itemName);
+        continue;
+      }
+      
+      if (fs.existsSync(itemPath)) {
+        const stats = fs.statSync(itemPath);
+        
+        if (stats.isDirectory()) {
+          console.log(`download-bulk: Adding directory ${itemName} to ZIP`);
+          archive.directory(itemPath, itemName);
+        } else {
+          console.log(`download-bulk: Adding file ${itemName} to ZIP`);
+          archive.file(itemPath, { name: itemName });
+        }
+        processedItems++;
+      } else {
+        console.warn('download-bulk: Item not found:', itemPath);
+      }
+    }
+    
+    if (processedItems === 0) {
+      return res.status(404).json({ error: 'No valid items found to download' });
+    }
+    
+    archive.on('progress', (progress) => {
+      console.log('download-bulk: Archiving progress:', progress.entries.processed, 'entries processed');
+    });
+    
+    archive.on('end', () => {
+      console.log(`download-bulk: Archive finalized successfully with ${processedItems}/${totalItems} items`);
+    });
+    
+    archive.on('error', (err) => {
+      console.error('download-bulk archiver error:', err);
+      res.status(500).json({ error: 'Failed to create bulk archive' });
+    });
+    
+    archive.finalize();
+    
+  } catch (error) {
+    console.error('Error in bulk download:', error);
+    res.status(500).json({ error: 'Failed to create bulk download' });
+  }
+});
+
+// ===== Server Start =====
+const PORT = process.env.PORT || 5001;
+
+// Initialize database and start server
+async function startServer() {
+  try {
+    await initializeDatabase();
+    
+    app.listen(PORT, () => {
+      console.log(`\n🚀 Server is running on port ${PORT}`);
+      console.log(`📊 Database: ${DATABASE_TYPE}`);
+      if (DATABASE_TYPE === 'mongodb') {
+        console.log('👤 Default admin: admin/admin123');
+        console.log('🔗 MongoDB: mongodb://localhost:27017/vision-app');
+      }
+      console.log(`🌐 Frontend: http://localhost:3000`);
+      console.log(`🔌 Backend API: http://localhost:${PORT}`);
+    });
+  } catch (error) {
+    console.error('❌ Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+startServer();

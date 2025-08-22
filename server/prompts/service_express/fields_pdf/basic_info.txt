@@ -1,0 +1,58 @@
+Extract basic contract information for SERVICE EXPRESS contracts from PDF data and return ONLY a valid JSON object. No explanations, no text, just JSON.
+
+**CRITICAL: Your entire response must be a single JSON object starting with { and ending with }**
+
+Required fields:
+"Building Name" - Extract building name from format like "5066 - บมจ. ซีพี แอ็กซ์ตร้า ปากช่อง (5066)" or "บมจ. ซีพีแอ๊กซ์ตร้าบางปะกอก(5036)", return only the building name part "บมจ. ซีพี แอ็กซ์ตร้า ปากช่อง"
+
+"Building ID" - Extract 4-digit building ID from the same format above
+
+"อยู่กองทรัสต์หรือไม่" - If Building ID starts with "00" put "Yes", otherwise "No"
+
+
+"Contract Number" - **CRITICAL EXTRACTION PATTERNS:**
+1. Format: "xxxx_LOxxxx_xxxxx" or "xxxx_LRxxxx_xxxxx" 
+2. Look in multiple locations:
+   - Contract header/title sections
+   - "Opp" field or opportunity number
+   - "lease Offer number" or "lease renewal number" labels
+   - Near building ID or reference numbers
+3. **EXAMPLES**: "5066_LO2401_00123", "5036_LR2412_00456"
+4. **NEVER RETURN NULL** - if standard pattern not found, look for any number sequence that could be contract identifier
+
+"Brand Name" - ชื่อร้าน or brand name from PDF contract text
+
+"Property Type" - Property type designation from contract
+
+"Customer Name" - Full customer name from contract
+
+"Customer Address" - Customer address from contract
+
+"Individual or Corporate" - Analyze Customer Name: if clearly a person's name (given name + surname, no business identifiers) = "Individual"; if contains business terms like "Co.", "Ltd.", "Inc.", "Corporation" = "Corporate"; if uncertain = "—"
+
+"แนบหนังสือรับรองบริษัท" - If "Individual or Corporate" is "Corporate", check if PDF includes corporate certificate document or "หนังสือรับรองความเป็นนิติบุคคล": present = "Yes", not present = "No". If "Individual" = mark as valid with reason "Individual customer"
+
+"Unit ID" - Format: PXXXX where x is number (also called Space Id)
+
+"Space (NLA)" - Area in square meters (ขนาดพื้นที่) from contract
+
+"Tenant Type" - **PDF PATTERNS**: Look for tenant type near unit information or in tenant details section. Return in "CODE - DESCRIPTION" format if available
+
+"Proposed lease commencement date" - Start date of lease from contract
+
+"Proposed lease expiry date" - End date of lease from contract
+
+**DERIVED FINANCIAL FIELDS (computed from PDF lease terms):**
+"Monthly Service Rate" - Extract from Thai patterns: "ในอัตราเดือนละ" followed by amount and "บาท"
+"Total Deposits" - Extract total deposit amount from "เงินประกัน" patterns
+"Net Rent (p.m.)" - Use Monthly Rental Rate value
+"Lease Type" - **ALWAYS "Service Express"**
+
+**CRITICAL JSON FORMATTING REQUIREMENTS:**
+1. ALWAYS return ONLY a valid JSON object - NOTHING ELSE
+2. ALWAYS use double quotes for all strings  
+3. DO NOT include any text, explanations, or markdown before or after the JSON
+4. DO NOT use <think> tags, comments, or reasoning
+5. DO NOT wrap in ```json``` code blocks
+6. ENSURE "Contract Number" field is properly extracted to prevent "unknown_contract" error
+7. Your response must start with { and end with }

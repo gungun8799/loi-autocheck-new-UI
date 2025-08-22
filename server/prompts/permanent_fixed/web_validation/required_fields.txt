@@ -1,0 +1,59 @@
+Validate required fields for PERMANENT FIXED contracts from WEB scraped data. Return JSON array of validation results.
+
+**IMPORTANT**: Only validate the essential web fields listed below. Do not validate fields not in this list.
+
+Web-specific validation rules for required fields:
+
+"Contract Number" - Must be present and match format
+
+"Customer Name" - Must be present in web data
+
+"Brand Name" - Must be present (may appear twice in list, validate both instances)
+
+"Building Name" - Must be present and contain building information
+
+"Unit ID" - Must be present. Accept formats: PXXXX (e.g., P001) or PGXXX (e.g., PG047)
+
+"Space (NLA)" - Must be present as numerical value
+
+"Monthly Rental Rate" - Must be present as numerical value (may appear twice in list, validate both instances)
+
+"Lease Type" - Must match contract type (Permanent Fixed)
+
+"Building ID" - Must be present as 4-digit number
+
+"อยู่กองทรัสต์หรือไม่" - Must be present ("Yes" or "No")
+
+"Customer Type" - Must be present 
+
+"Unit Status" - Must be present
+
+"Proposed lease commencement date" - Must be present as valid date
+
+"Proposed lease expiry date" - Must be present as valid date
+
+"Monthly Service Rate" - Must be present as numerical value
+
+"Rental Deposit" - Must be present as numerical value
+
+"Service Deposit" - Must be present as numerical value
+
+**WEB-SPECIFIC RULES:**
+- Web data may have different field names than PDF
+- Focus on data completeness from web scraping
+- Allow for web formatting differences (currency symbols, etc.)
+- Validate that essential lease information is captured from web source
+
+**LO/LR CONTRACT VARIATIONS:**
+- **LR CONTRACT RULE**: For LR (renewal) contracts, some fields may be abbreviated or referenced
+- **LO CONTRACT RULE**: For LO (new) contracts, all fields should be complete
+
+Return format:
+[
+  {
+    "field": "Field name",
+    "value": "Web extracted value",
+    "valid": true or false,
+    "reason": "Validation explanation"
+  }
+]

@@ -1,0 +1,49 @@
+Extract citizen ID and company certificate information and return in JSON format.
+
+**WEB EXTRACTION PATTERNS:**
+Extract data from HTML form fields, table cells, and structured web elements.
+
+**IMPORTANT:** For corporate customers (Customer Name contains "บริษัท", "จำกัด", "Co.", "Ltd."), also extract company certificate information.
+
+Required fields:
+"Name on Citizen ID card" - **PDF PATTERNS:** Look for "ชื่อตัวและชื่อสกุล" followed by Thai name, or "Name" followed by English name. Return the Thai name format if available. **WEB:** Name as it appears on citizen ID
+
+"Address on Citizen ID card" - **PDF PATTERNS:** Look for "ที่อยู่" followed by full address including district, province and postal code. **WEB:** Address as it appears on citizen ID
+
+"Citizen ID Number" - **PDF PATTERNS:** Look for Thai citizen ID numbers using multiple patterns:
+1. "เลขประจำตัวประชาชน" followed by 13-digit number with or without spaces
+2. "Identification Number" followed by 13-digit number with or without spaces  
+3. Pattern matching: Look for sequences like "X XXXX XXXXX XX X" (13 digits with spaces)
+4. Context clues: Numbers appearing on Thai National ID Card pages near "บัตรประจำตัวประชาชน"
+5. Extract the complete 13-digit sequence, preserving spaces in display format (e.g., "3 1501 00126 15 8")
+**WEB:** 13-digit Thai citizen ID number
+
+"Citizen ID expiration date" - **PDF PATTERNS:** Look for "วันบัตรหมดอายุ" or "Date of Expiry" followed by date. Convert to standard date format. **WEB:** Expiration date of citizen ID
+
+**FOR CORPORATE CUSTOMERS ONLY:**
+"Company Registration Number" - **PDF PATTERNS:** Look for "ทะเบียนนิติบุคคลเลขที่" followed by 10-13 digit number. Extract the registration number
+
+"Company Certificate issued date" - **PDF PATTERNS:** Look for "ออกให้ ณ วันที่" followed by date in Thai format. Extract the complete date text
+
+"Names on Company Certificate" - **PDF PATTERNS:** Look for director list under "กรรมการของบริษัทมี" followed by names starting with "นาย". Extract all director names and format as comma-separated list
+
+"Company Registered Address" - **PDF PATTERNS:** Extract complete company registered address using multiple search patterns:
+1. **PRIMARY PATTERNS**: Look for "สำนักงานแห่งใหญ่" or "ตั้งอยู่เลขที่" followed by complete address
+2. **ALTERNATIVE PATTERNS**: Look for "ที่ตั้งสำนักงานใหญ่", "ที่อยู่บริษัท", "สถานที่ตั้ง" 
+3. **COMPLETE ADDRESS REQUIREMENT**: Extract the FULL address including:
+   - Street number (เลขที่)
+   - Village/Moo (หมู่ที่)
+   - Sub-district (ตำบล)
+   - District (อำเภอ)
+   - Province (จังหวัด)
+   - Postal code (รหัสไปรษณีย์)
+4. **CONTEXT CLUES**: Often found in company certificate sections or registration documents
+5. **NEVER TRUNCATE**: Ensure complete address is extracted, not just partial text
+
+"แนบหนังสือรับรองบริษัท" - **PDF PATTERNS:** Check if company registration certificate document pages exist in the PDF. Return "Yes" if found, "No" if missing
+
+"มีตราประทับบนหนังสือรับรองบริษัทหรือไม่" - **PDF PATTERNS:** Look for stamp-related text like "ประทับตรา", "ตราสำคัญ", or stamp references in certificate. Return "Yes" if any found, "No" if none
+
+"Workflow status" - Workflow status from: Start, Draft, Pending GTO Update, Pending Approval, Accepted, Rejected (in this order only)
+
+**NOTE:** For individual customers, company certificate fields should return null

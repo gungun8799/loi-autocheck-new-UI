@@ -1,0 +1,15 @@
+Validate business rules (Part 2/2) and return JSON array of validation results.
+
+**NOTE**: This part handles business rules not covered in Part 1. Fields like Monthly Rental Rate, Monthly Service Rate, Rental Deposit, and Service Deposit are already validated in the required_fields category.
+
+**SKIP VALIDATION**: Return empty array [] as these fields are handled by required_fields validation to avoid duplication.
+
+Return format:
+[
+  {
+    "field": "Field name", 
+    "value": "Extracted value (or null)",
+    "valid": true or false,
+    "reason": "Explanation"
+  }
+]
