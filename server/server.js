@@ -721,6 +721,16 @@ app.use(
   express.static(path.join(__dirname, 'prompts'))
 );
 
+// ===== API Health Check =====
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    database: DATABASE_TYPE,
+    port: PORT || process.env.PORT || 5001
+  });
+});
+
 // ===== AUTHENTICATION ROUTES (MongoDB mode only) =====
 if (DATABASE_TYPE === 'mongodb') {
   // User Registration
@@ -3604,95 +3614,14 @@ app.post('/api/validate-modular', async (req, res) => {
   }
   
   try {
-    // === Excel File Validations (Master_9_cell.xlsx, Master_PT.xlsx, bigtenant.xlsx) ===
+    // === Read Excel Files Early for Validation Context ===
+    console.log('[📊 Reading Excel validation context early for deposit rules]');
+    const excelContext = readExcelValidationContext(extractedData);
+    
+    // Extract variables for backward compatibility with existing code
+    const { buildingFoundInExcel, brandFoundInPT, customerFoundInBigTenant, buildingId, brandName, customerName } = excelContext;
+    
     let excelValidationResults = [];
-    const buildingId = extractedData['Building ID'];
-    const brandName = extractedData['Brand Name'];
-    const customerName = extractedData['Customer Name'];
-    
-    // 1) Master_9_cell.xlsx - Building ID check for deposit rules
-    let buildingFoundInExcel = false;
-    const masterExcelPath = path.join(__dirname, 'prompts', 'Master_9_cell.xlsx');
-    if (fs.existsSync(masterExcelPath)) {
-      console.log('[Modular Validation] Found Master_9_cell.xlsx; reading...');
-      try {
-        const workbook = xlsx.readFile(masterExcelPath);
-        const firstSheetName = workbook.SheetNames[0];
-        const masterData = xlsx.utils.sheet_to_json(workbook.Sheets[firstSheetName]);
-        
-        if (masterData.length > 0 && buildingId) {
-          const firstColumnHeader = Object.keys(masterData[0])[0];
-          buildingFoundInExcel = masterData.some(row => 
-            String(row[firstColumnHeader]).trim() === String(buildingId).trim()
-          );
-          console.log(buildingFoundInExcel 
-            ? `[Modular Validation] Building ID "${buildingId}" FOUND in Master_9_cell.xlsx`
-            : `[Modular Validation] Building ID "${buildingId}" NOT FOUND in Master_9_cell.xlsx`
-          );
-        }
-      } catch (err) {
-        console.error('[Modular Validation] Error reading Master_9_cell.xlsx:', err);
-      }
-    }
-    
-    // 2) Master_PT.xlsx - Brand Name check for tax rules
-    let brandFoundInPT = false;
-    const ptExcelPath = path.join(__dirname, 'prompts', 'Master_PT.xlsx');
-    if (fs.existsSync(ptExcelPath)) {
-      console.log('[Modular Validation] Found Master_PT.xlsx; reading...');
-      try {
-        const wbPT = xlsx.readFile(ptExcelPath);
-        const ptSheetName = wbPT.SheetNames[0];
-        const ptData = xlsx.utils.sheet_to_json(wbPT.Sheets[ptSheetName]);
-        
-        if (ptData.length > 0 && brandName) {
-          const secondColumnHeader = Object.keys(ptData[0])[1];
-          brandFoundInPT = ptData.some(row => {
-            const brandInSheet = String(row[secondColumnHeader] || '').trim().toLowerCase();
-            return brandInSheet === String(brandName).trim().toLowerCase();
-          });
-          console.log(brandFoundInPT 
-            ? `[Modular Validation] Brand Name "${brandName}" FOUND in Master_PT.xlsx`
-            : `[Modular Validation] Brand Name "${brandName}" NOT FOUND in Master_PT.xlsx`
-          );
-        }
-      } catch (err) {
-        console.error('[Modular Validation] Error reading Master_PT.xlsx:', err);
-      }
-    }
-    
-    // 3) bigtenant.xlsx - Customer Name check for deposit rules
-    let customerFoundInBigTenant = false;
-    const bigTenantPath = path.join(__dirname, 'prompts', 'bigtenant.xlsx');
-    if (fs.existsSync(bigTenantPath)) {
-      console.log('[Modular Validation] Found bigtenant.xlsx; reading...');
-      try {
-        const wbBig = xlsx.readFile(bigTenantPath);
-        const bigSheetName = wbBig.SheetNames[0];
-        const bigTenantData = xlsx.utils.sheet_to_json(wbBig.Sheets[bigSheetName]);
-        
-        if (bigTenantData.length > 0 && customerName) {
-          // Check all columns for customer name match (exact match, case-insensitive)
-          customerFoundInBigTenant = bigTenantData.some(row => {
-            return Object.values(row).some(cellValue => {
-              if (cellValue === null || cellValue === undefined || cellValue === '') {
-                return false;
-              }
-              const cellStr = String(cellValue).trim().toLowerCase();
-              const customerStr = String(customerName).trim().toLowerCase();
-              // Exact match only, no partial matches
-              return cellStr !== '' && cellStr === customerStr;
-            });
-          });
-          console.log(customerFoundInBigTenant 
-            ? `[Modular Validation] Customer Name "${customerName}" FOUND in bigtenant.xlsx`
-            : `[Modular Validation] Customer Name "${customerName}" NOT FOUND in bigtenant.xlsx`
-          );
-        }
-      } catch (err) {
-        console.error('[Modular Validation] Error reading bigtenant.xlsx:', err);
-      }
-    }
 
     // Use PromptManager to get validation prompts
     const promptManager = new PromptManager();
@@ -3725,8 +3654,299 @@ app.post('/api/validate-modular', async (req, res) => {
     const LOTUS_LLM_URL = 'https://api-cpxis.lotuss.com/llm/v1/chat/completions';
     const LOTUS_API_KEY = 'accounting.lotuss.F51DAF28FD6422DDF3CD864F833CC';
     
+    // Function to read Excel files early for validation context
+    function readExcelValidationContext(extractedData) {
+      const buildingId = extractedData['Building ID'];
+      const brandName = extractedData['Brand Name'];
+      const customerName = extractedData['Customer Name'];
+      
+      let buildingFoundInExcel = false;
+      let brandFoundInPT = false;
+      let customerFoundInBigTenant = false;
+      
+      // 1) Master_9_cell.xlsx - Building ID check for deposit rules
+      const masterExcelPath = path.join(__dirname, 'prompts', 'Master_9_cell.xlsx');
+      if (fs.existsSync(masterExcelPath)) {
+        try {
+          const workbook = xlsx.readFile(masterExcelPath);
+          const firstSheetName = workbook.SheetNames[0];
+          const masterData = xlsx.utils.sheet_to_json(workbook.Sheets[firstSheetName]);
+          
+          if (masterData.length > 0 && buildingId) {
+            const firstColumnHeader = Object.keys(masterData[0])[0];
+            buildingFoundInExcel = masterData.some(row => 
+              String(row[firstColumnHeader]).trim() === String(buildingId).trim()
+            );
+            console.log(`[Excel Context] Building ID "${buildingId}" ${buildingFoundInExcel ? 'FOUND' : 'NOT FOUND'} in Master_9_cell.xlsx`);
+          }
+        } catch (err) {
+          console.error('[Excel Context] Error reading Master_9_cell.xlsx:', err);
+        }
+      }
+      
+      // 2) Master_PT.xlsx - Brand Name check for tax rules
+      const ptExcelPath = path.join(__dirname, 'prompts', 'Master_PT.xlsx');
+      if (fs.existsSync(ptExcelPath)) {
+        try {
+          const wbPT = xlsx.readFile(ptExcelPath);
+          const ptSheetName = wbPT.SheetNames[0];
+          const ptData = xlsx.utils.sheet_to_json(wbPT.Sheets[ptSheetName]);
+          
+          if (ptData.length > 0 && brandName) {
+            const secondColumnHeader = Object.keys(ptData[0])[1];
+            brandFoundInPT = ptData.some(row => {
+              const brandInSheet = String(row[secondColumnHeader] || '').trim().toLowerCase();
+              return brandInSheet === String(brandName).trim().toLowerCase();
+            });
+            console.log(`[Excel Context] Brand Name "${brandName}" ${brandFoundInPT ? 'FOUND' : 'NOT FOUND'} in Master_PT.xlsx`);
+          }
+        } catch (err) {
+          console.error('[Excel Context] Error reading Master_PT.xlsx:', err);
+        }
+      }
+      
+      // 3) bigtenant.xlsx - Customer Name check for deposit rules
+      const bigTenantPath = path.join(__dirname, 'prompts', 'bigtenant.xlsx');
+      if (fs.existsSync(bigTenantPath)) {
+        try {
+          const wbBig = xlsx.readFile(bigTenantPath);
+          const bigSheetName = wbBig.SheetNames[0];
+          const bigTenantData = xlsx.utils.sheet_to_json(wbBig.Sheets[bigSheetName]);
+          
+          if (bigTenantData.length > 0 && customerName) {
+            customerFoundInBigTenant = bigTenantData.some(row => {
+              return Object.values(row).some(cellValue => {
+                if (cellValue === null || cellValue === undefined || cellValue === '') {
+                  return false;
+                }
+                const cellStr = String(cellValue).trim().toLowerCase();
+                const customerStr = String(customerName).trim().toLowerCase();
+                return cellStr !== '' && cellStr === customerStr;
+              });
+            });
+            console.log(`[Excel Context] Customer Name "${customerName}" ${customerFoundInBigTenant ? 'FOUND' : 'NOT FOUND'} in bigtenant.xlsx`);
+          }
+        } catch (err) {
+          console.error('[Excel Context] Error reading bigtenant.xlsx:', err);
+        }
+      }
+      
+      return {
+        buildingFoundInExcel,
+        brandFoundInPT,
+        customerFoundInBigTenant,
+        buildingId,
+        brandName,
+        customerName
+      };
+    }
+    
+    // Function to intelligently combine deposit validation results
+    function combineDepositValidationResults(depositResults, contractType, contractNumber, excelContext = null) {
+      console.log(`[🔄 Combining deposit validation results for ${contractType}]`);
+      
+      // Log Excel context information
+      if (excelContext) {
+        console.log(`[📊 Excel Context] Building in Master_9_cell: ${excelContext.buildingFoundInExcel}, Customer in BigTenant: ${excelContext.customerFoundInBigTenant}`);
+      }
+      
+      if (!depositResults || depositResults.length === 0) {
+        return null;
+      }
+
+      // Find all deposit-related validations
+      const tenancyDepositResults = depositResults.filter(result => 
+        result.field && (
+          result.field.includes('Tenancy Deposit') || 
+          result.field.includes('Total Deposits') ||
+          result.field.includes('Total Rent Deposit') ||
+          result.field.includes('Total Service Deposit')
+        )
+      );
+
+      if (tenancyDepositResults.length === 0) {
+        return null;
+      }
+
+      console.log(`[📊 Found ${tenancyDepositResults.length} deposit validation results to combine]`);
+
+      // Extract all applicable rules and their multipliers
+      const applicableRules = [];
+      
+      for (const result of tenancyDepositResults) {
+        if (result.valid === null) continue; // Skip null results
+        
+        const reason = result.reason || '';
+        let multiplier = 3; // default
+        let ruleName = 'Default';
+        let priority = 10; // lower number = higher priority
+
+        // Parse multiplier and rule type from reason
+        if (reason.includes('ATM SCB') && reason.includes('may be zero')) {
+          multiplier = 0;
+          ruleName = 'ATM SCB Exception';
+          priority = 1; // Highest priority exception
+        } else if (reason.includes('1 ×') || reason.includes('1 × ')) {
+          multiplier = 1;
+          if (reason.includes('ATM') || reason.includes('Service Express')) {
+            ruleName = 'ATM/Service Express Low Rate';
+            priority = 2;
+          }
+        } else if (reason.includes('2 ×') || reason.includes('2 × ')) {
+          multiplier = 2;
+          if (reason.includes('Master_9_cell') || reason.includes('Master Cell')) {
+            ruleName = 'Master Cell Building';
+            priority = 4;
+          } else if (reason.includes('not Hypermarket') || reason.includes('Non-Hypermarket')) {
+            ruleName = 'Non-Hypermarket';
+            priority = 5;
+          } else {
+            ruleName = 'Local Tenant';
+            priority = 6;
+          }
+        } else if (reason.includes('4 ×') || reason.includes('4 × ')) {
+          multiplier = 4;
+          ruleName = 'LO Non-Qualified Major Property';
+          priority = 2; // Very strict rule
+        } else if (reason.includes('3 ×') || reason.includes('3 × ')) {
+          multiplier = 3;
+          if (reason.includes('bigtenant') || reason.includes('Big Tenant')) {
+            ruleName = 'Big Tenant';
+            priority = 3;
+          } else {
+            ruleName = 'Default 3x';
+            priority = 7;
+          }
+        }
+
+        applicableRules.push({
+          result: result,
+          multiplier: multiplier,
+          ruleName: ruleName,
+          priority: priority,
+          isValid: result.valid
+        });
+      }
+
+      if (applicableRules.length === 0) {
+        return null;
+      }
+
+      console.log(`[📋 Applicable rules:`, applicableRules.map(r => `${r.ruleName} (${r.multiplier}×, priority: ${r.priority}, valid: ${r.isValid})`).join(', '));
+
+      // Apply intelligent rule combination logic
+      let finalResult;
+
+      // Special case: ATM SCB zero-deposit exception
+      const atmScbRule = applicableRules.find(r => r.ruleName === 'ATM SCB Exception');
+      if (atmScbRule) {
+        console.log(`[✅ ATM SCB Exception applies - no deposit required]`);
+        finalResult = atmScbRule.result;
+      } else {
+        // Apply Excel-based rule overrides BEFORE selecting final rule
+        if (excelContext) {
+          // Rule Priority (highest to lowest):
+          // 1. Big Tenant (bigtenant.xlsx) - MUST be 3× minimum regardless of other rules
+          // 2. Master_9_cell.xlsx Building - Reduces requirement to 2× instead of 3×
+          
+          if (excelContext.customerFoundInBigTenant) {
+            console.log(`[🏢 Excel Override] Customer found in bigtenant.xlsx - enforcing 3× minimum deposit requirement`);
+            // Add/override with Big Tenant rule that enforces 3× minimum
+            const bigTenantOverride = {
+              result: {
+                field: 'Tenancy Deposit',
+                value: depositResults[0]?.value || null,
+                valid: null, // Will be determined by actual amount vs 3× requirement
+                reason: `Excel Override: Customer "${excelContext.customerName}" found in bigtenant.xlsx - deposit must be ≥ 3 × Monthly rental rate (Big Tenant rule)`
+              },
+              multiplier: 3,
+              ruleName: 'Excel Big Tenant Override',
+              priority: 1, // Highest priority override
+              isValid: null
+            };
+            
+            // Replace or add the big tenant rule
+            const existingBigTenantIndex = applicableRules.findIndex(r => r.ruleName.includes('Big Tenant'));
+            if (existingBigTenantIndex >= 0) {
+              applicableRules[existingBigTenantIndex] = bigTenantOverride;
+            } else {
+              applicableRules.push(bigTenantOverride);
+            }
+          } else if (excelContext.buildingFoundInExcel) {
+            console.log(`[🏢 Excel Override] Building ID found in Master_9_cell.xlsx - reducing deposit requirement to 2× instead of 3×`);
+            // Add/override with Master Cell rule that reduces to 2×
+            const masterCellOverride = {
+              result: {
+                field: 'Tenancy Deposit',
+                value: depositResults[0]?.value || null,
+                valid: null, // Will be determined by actual amount vs 2× requirement
+                reason: `Excel Override: Building ID "${excelContext.buildingId}" found in Master_9_cell.xlsx - deposit requirement reduced to 2 × Monthly rental rate`
+              },
+              multiplier: 2,
+              ruleName: 'Excel Master Cell Override',
+              priority: 3, // High priority override
+              isValid: null
+            };
+            
+            // Only apply if there isn't already a stricter rule
+            const hasStricterRule = applicableRules.some(r => r.multiplier > 2);
+            if (!hasStricterRule) {
+              const existingMasterCellIndex = applicableRules.findIndex(r => r.ruleName.includes('Master Cell'));
+              if (existingMasterCellIndex >= 0) {
+                applicableRules[existingMasterCellIndex] = masterCellOverride;
+              } else {
+                applicableRules.push(masterCellOverride);
+              }
+            } else {
+              console.log(`[📋 Excel Override] Master Cell 2× rule not applied - stricter rule already exists`);
+            }
+          }
+        }
+        // Find the rule with highest multiplier (most restrictive)
+        const strictestRule = applicableRules.reduce((strictest, current) => {
+          if (current.multiplier > strictest.multiplier) {
+            return current;
+          } else if (current.multiplier === strictest.multiplier) {
+            // Same multiplier - use priority (lower priority number = higher actual priority)
+            return current.priority < strictest.priority ? current : strictest;
+          }
+          return strictest;
+        });
+
+        console.log(`[🎯 Most restrictive rule: ${strictestRule.ruleName} (${strictestRule.multiplier}×)]`);
+
+        // Create combined validation result
+        const combinedReasons = applicableRules
+          .filter(r => r.multiplier >= strictestRule.multiplier * 0.8) // Include rules within 20% of strictest
+          .map(r => `${r.ruleName} (${r.multiplier}×)`)
+          .join(', ');
+
+        finalResult = {
+          ...strictestRule.result,
+          reason: `Combined deposit validation - Most restrictive rule: ${strictestRule.ruleName} (${strictestRule.multiplier}×). All applicable rules: ${combinedReasons}`,
+          field: 'Tenancy Deposit' // Standardize field name
+        };
+      }
+
+      // Validate the final result makes sense
+      if (finalResult.valid === true && finalResult.reason.includes('less than')) {
+        console.log(`[⚠️ Detected inconsistency - marking as invalid due to "less than" in reason]`);
+        finalResult.valid = false;
+      }
+
+      console.log(`[✅ Final combined deposit validation:`, {
+        field: finalResult.field,
+        value: finalResult.value,
+        valid: finalResult.valid,
+        reason: finalResult.reason.substring(0, 100) + '...'
+      });
+
+      return finalResult;
+    }
+    
     // Process each validation category separately
     const allValidationResults = [];
+    const depositValidationResults = []; // Collect all deposit-related results for intelligent combination
     console.log(`[🔄 Using chunked Lotus LLM validation for ${sourceType}]`);
     
     for (const category of validationCategories) {
@@ -3909,13 +4129,42 @@ app.post('/api/validate-modular', async (req, res) => {
             
             // Handle chunked validation merging
             if (category.includes('_part1') || category.includes('_part2') || category.includes('_part3')) {
-              // Filter out null results from parts that indicate "proceed to next part"
-              const validResults = parsed.filter(item => item.valid !== null);
-              if (validResults.length > 0) {
-                console.log(`[🔀 ${category}] Adding ${validResults.length} valid results, filtered ${parsed.length - validResults.length} null results`);
-                allValidationResults.push(...validResults);
+              // Special handling for deposit rules - collect ALL results (including nulls) for intelligent combination
+              if (category.includes('deposit') || category === 'deposits_lo') {
+                console.log(`[🏦 ${category}] Collecting deposit validation results for intelligent combination`);
+                // Add ALL deposit results (including nulls) to deposit collection
+                const depositResults = parsed.filter(item => 
+                  item.field && (
+                    item.field.includes('Tenancy Deposit') || 
+                    item.field.includes('Total Deposits') ||
+                    item.field.includes('Total Rent Deposit') ||
+                    item.field.includes('Total Service Deposit')
+                  )
+                );
+                depositValidationResults.push(...depositResults);
+                
+                // For non-deposit fields in deposit categories, process normally
+                const nonDepositResults = parsed.filter(item => 
+                  !item.field || !(
+                    item.field.includes('Tenancy Deposit') || 
+                    item.field.includes('Total Deposits') ||
+                    item.field.includes('Total Rent Deposit') ||
+                    item.field.includes('Total Service Deposit')
+                  )
+                ).filter(item => item.valid !== null);
+                
+                if (nonDepositResults.length > 0) {
+                  allValidationResults.push(...nonDepositResults);
+                }
               } else {
-                console.log(`[⏭️ ${category}] No valid results or empty array - skipping to avoid duplication`);
+                // Non-deposit rules: Filter out null results from parts that indicate "proceed to next part"
+                const validResults = parsed.filter(item => item.valid !== null);
+                if (validResults.length > 0) {
+                  console.log(`[🔀 ${category}] Adding ${validResults.length} valid results, filtered ${parsed.length - validResults.length} null results`);
+                  allValidationResults.push(...validResults);
+                } else {
+                  console.log(`[⏭️ ${category}] No valid results or empty array - skipping to avoid duplication`);
+                }
               }
             } else {
               allValidationResults.push(...parsed);
@@ -4062,6 +4311,26 @@ Return JSON array format: [{"field":"name","value":"extracted_value","valid":tru
           }
         }
       }
+    }
+    
+    // Combine deposit validation results intelligently after all deposit rules have been processed
+    if (depositValidationResults.length > 0) {
+      console.log(`[🏦 Processing ${depositValidationResults.length} collected deposit validation results]`);
+      const combinedDepositResult = combineDepositValidationResults(depositValidationResults, contractType, contractNumber, excelContext);
+      
+      if (combinedDepositResult) {
+        console.log(`[✅ Combined deposit validation completed - adding to final results]`);
+        allValidationResults.push(combinedDepositResult);
+      } else {
+        console.log(`[⚠️ No valid combined deposit result - using original results]`);
+        // Fallback: add the best available deposit result
+        const bestDepositResult = depositValidationResults.find(r => r.valid !== null);
+        if (bestDepositResult) {
+          allValidationResults.push(bestDepositResult);
+        }
+      }
+    } else {
+      console.log(`[ℹ️ No deposit validation results to combine]`);
     }
     
     // Add missing web validation fields if categories failed
@@ -7281,6 +7550,269 @@ app.post('/api/download-bulk', (req, res) => {
   } catch (error) {
     console.error('Error in bulk download:', error);
     res.status(500).json({ error: 'Failed to create bulk download' });
+  }
+});
+
+// ===== Manual Validation Endpoints =====
+
+// Test endpoint to verify API is working
+app.get('/api/manual-validation/test', (req, res) => {
+  console.log('[API Test] Manual validation test endpoint hit');
+  res.json({ 
+    status: 'ok', 
+    database: DATABASE_TYPE,
+    timestamp: new Date().toISOString(),
+    message: 'Manual validation endpoints are available'
+  });
+});
+
+// Update manual validation for Compare Result table
+app.post('/api/manual-validation/compare', async (req, res) => {
+  try {
+    const { contractNumber, fieldIndex, updates, user } = req.body;
+    console.log('[Manual Validation] Compare request:', { contractNumber, fieldIndex, updates, user });
+    
+    if (!contractNumber || fieldIndex === undefined || !updates) {
+      console.log('[Manual Validation] Missing params:', { 
+        hasContractNumber: !!contractNumber, 
+        hasFieldIndex: fieldIndex !== undefined, 
+        hasUpdates: !!updates 
+      });
+      return res.status(400).json({ error: 'Missing required parameters' });
+    }
+
+    const docId = contractNumber.replace(/\//g, '_');
+    
+    if (DATABASE_TYPE === 'mongodb') {
+      const DocumentModel = mongoose.model('Document');
+      const document = await DocumentModel.findOne({ filename: contractNumber });
+      
+      if (!document || !document.compare_result) {
+        return res.status(404).json({ error: 'Document or compare result not found' });
+      }
+      
+      // Update the specific field
+      if (document.compare_result[fieldIndex]) {
+        if (updates.match !== undefined) document.compare_result[fieldIndex].match = updates.match;
+        if (updates.reason !== undefined) document.compare_result[fieldIndex].reason = updates.reason;
+        document.compare_result[fieldIndex].manually_validated = true;
+        document.compare_result[fieldIndex].validated_by = user || 'Unknown';
+        document.compare_result[fieldIndex].validated_at = new Date();
+      }
+      
+      await document.save();
+    } else {
+      // Firebase
+      const docRef = db.collection('compare_result').doc(docId);
+      const doc = await docRef.get();
+      
+      if (!doc.exists || !doc.data().compare_result) {
+        return res.status(404).json({ error: 'Document or compare result not found' });
+      }
+      
+      const data = doc.data();
+      if (data.compare_result[fieldIndex]) {
+        if (updates.match !== undefined) data.compare_result[fieldIndex].match = updates.match;
+        if (updates.reason !== undefined) data.compare_result[fieldIndex].reason = updates.reason;
+        data.compare_result[fieldIndex].manually_validated = true;
+        data.compare_result[fieldIndex].validated_by = user || 'Unknown';
+        data.compare_result[fieldIndex].validated_at = new Date();
+      }
+      
+      await docRef.update({ compare_result: data.compare_result });
+    }
+    
+    res.json({ success: true, message: 'Compare result updated successfully' });
+  } catch (error) {
+    console.error('Error updating compare result:', error);
+    res.status(500).json({ error: 'Failed to update compare result' });
+  }
+});
+
+// Update manual validation for PDF Validation Result table
+app.post('/api/manual-validation/pdf-validation', async (req, res) => {
+  try {
+    const { contractNumber, fieldIndex, updates, user } = req.body;
+    
+    if (!contractNumber || fieldIndex === undefined || !updates) {
+      return res.status(400).json({ error: 'Missing required parameters' });
+    }
+
+    const docId = contractNumber.replace(/\//g, '_');
+    
+    if (DATABASE_TYPE === 'mongodb') {
+      const DocumentModel = mongoose.model('Document');
+      const document = await DocumentModel.findOne({ filename: contractNumber });
+      
+      if (!document || !document.validation_result) {
+        return res.status(404).json({ error: 'Document or validation result not found' });
+      }
+      
+      if (document.validation_result[fieldIndex]) {
+        if (updates.valid !== undefined) document.validation_result[fieldIndex].valid = updates.valid;
+        if (updates.reason !== undefined) document.validation_result[fieldIndex].reason = updates.reason;
+        document.validation_result[fieldIndex].manually_validated = true;
+        document.validation_result[fieldIndex].validated_by = user || 'Unknown';
+        document.validation_result[fieldIndex].validated_at = new Date();
+      }
+      
+      await document.save();
+    } else {
+      // Firebase
+      const docRef = db.collection('compare_result').doc(docId);
+      const doc = await docRef.get();
+      
+      if (!doc.exists || !doc.data().validation_result) {
+        return res.status(404).json({ error: 'Document or validation result not found' });
+      }
+      
+      const data = doc.data();
+      if (data.validation_result[fieldIndex]) {
+        if (updates.valid !== undefined) data.validation_result[fieldIndex].valid = updates.valid;
+        if (updates.reason !== undefined) data.validation_result[fieldIndex].reason = updates.reason;
+        data.validation_result[fieldIndex].manually_validated = true;
+        data.validation_result[fieldIndex].validated_by = user || 'Unknown';
+        data.validation_result[fieldIndex].validated_at = new Date();
+      }
+      
+      await docRef.update({ validation_result: data.validation_result });
+    }
+    
+    res.json({ success: true, message: 'PDF validation result updated successfully' });
+  } catch (error) {
+    console.error('Error updating PDF validation result:', error);
+    res.status(500).json({ error: 'Failed to update PDF validation result' });
+  }
+});
+
+// Update manual validation for Simplicity Validation Result table
+app.post('/api/manual-validation/web-validation', async (req, res) => {
+  try {
+    const { contractNumber, fieldIndex, updates, user } = req.body;
+    
+    if (!contractNumber || fieldIndex === undefined || !updates) {
+      return res.status(400).json({ error: 'Missing required parameters' });
+    }
+
+    const docId = contractNumber.replace(/\//g, '_');
+    
+    if (DATABASE_TYPE === 'mongodb') {
+      const DocumentModel = mongoose.model('Document');
+      const document = await DocumentModel.findOne({ filename: contractNumber });
+      
+      if (!document || !document.web_validation_result) {
+        return res.status(404).json({ error: 'Document or web validation result not found' });
+      }
+      
+      if (document.web_validation_result[fieldIndex]) {
+        if (updates.valid !== undefined) document.web_validation_result[fieldIndex].valid = updates.valid;
+        if (updates.reason !== undefined) document.web_validation_result[fieldIndex].reason = updates.reason;
+        document.web_validation_result[fieldIndex].manually_validated = true;
+        document.web_validation_result[fieldIndex].validated_by = user || 'Unknown';
+        document.web_validation_result[fieldIndex].validated_at = new Date();
+      }
+      
+      await document.save();
+    } else {
+      // Firebase
+      const docRef = db.collection('compare_result').doc(docId);
+      const doc = await docRef.get();
+      
+      if (!doc.exists || !doc.data().web_validation_result) {
+        return res.status(404).json({ error: 'Document or web validation result not found' });
+      }
+      
+      const data = doc.data();
+      if (data.web_validation_result[fieldIndex]) {
+        if (updates.valid !== undefined) data.web_validation_result[fieldIndex].valid = updates.valid;
+        if (updates.reason !== undefined) data.web_validation_result[fieldIndex].reason = updates.reason;
+        data.web_validation_result[fieldIndex].manually_validated = true;
+        data.web_validation_result[fieldIndex].validated_by = user || 'Unknown';
+        data.web_validation_result[fieldIndex].validated_at = new Date();
+      }
+      
+      await docRef.update({ web_validation_result: data.web_validation_result });
+    }
+    
+    res.json({ success: true, message: 'Web validation result updated successfully' });
+  } catch (error) {
+    console.error('Error updating web validation result:', error);
+    res.status(500).json({ error: 'Failed to update web validation result' });
+  }
+});
+
+// Get manual validation history for a contract
+app.get('/api/manual-validation/history/:contractNumber', async (req, res) => {
+  try {
+    const contractNumber = req.params.contractNumber;
+    const docId = contractNumber.replace(/\//g, '_');
+    
+    let history = [];
+    
+    if (DATABASE_TYPE === 'mongodb') {
+      const DocumentModel = mongoose.model('Document');
+      const document = await DocumentModel.findOne({ filename: contractNumber });
+      
+      if (document) {
+        // Extract manual validation history from all result types
+        ['compare_result', 'validation_result', 'web_validation_result'].forEach(resultType => {
+          if (document[resultType]) {
+            document[resultType].forEach((item, index) => {
+              if (item.manually_validated) {
+                history.push({
+                  resultType,
+                  fieldIndex: index,
+                  field: item.field,
+                  validatedBy: item.validated_by,
+                  validatedAt: item.validated_at,
+                  updates: {
+                    match: item.match,
+                    valid: item.valid,
+                    reason: item.reason
+                  }
+                });
+              }
+            });
+          }
+        });
+      }
+    } else {
+      // Firebase
+      const docRef = db.collection('compare_result').doc(docId);
+      const doc = await docRef.get();
+      
+      if (doc.exists) {
+        const data = doc.data();
+        ['compare_result', 'validation_result', 'web_validation_result'].forEach(resultType => {
+          if (data[resultType]) {
+            data[resultType].forEach((item, index) => {
+              if (item.manually_validated) {
+                history.push({
+                  resultType,
+                  fieldIndex: index,
+                  field: item.field,
+                  validatedBy: item.validated_by,
+                  validatedAt: item.validated_at,
+                  updates: {
+                    match: item.match,
+                    valid: item.valid,
+                    reason: item.reason
+                  }
+                });
+              }
+            });
+          }
+        });
+      }
+    }
+    
+    // Sort by validation date, most recent first
+    history.sort((a, b) => new Date(b.validatedAt) - new Date(a.validatedAt));
+    
+    res.json({ success: true, history });
+  } catch (error) {
+    console.error('Error fetching manual validation history:', error);
+    res.status(500).json({ error: 'Failed to fetch validation history' });
   }
 });
 
