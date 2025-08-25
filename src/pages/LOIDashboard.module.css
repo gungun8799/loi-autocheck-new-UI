@@ -1523,3 +1523,65 @@ button.exportButton:hover {
     height: auto;  /* Auto adjust height based on content */
   }
 }
+
+/* Manual Validation Edit Styles */
+.editInput {
+  width: 100%;
+  padding: 4px 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.editActions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.editBtn, .saveBtn, .cancelBtn {
+  padding: 4px 8px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  min-width: 24px;
+  height: 24px;
+}
+
+.editBtn {
+  background-color: #f8f9fa;
+  color: #333;
+}
+
+.editBtn:hover {
+  background-color: #e9ecef;
+}
+
+.saveBtn {
+  background-color: #28a745;
+  color: white;
+}
+
+.saveBtn:hover {
+  background-color: #218838;
+}
+
+.cancelBtn {
+  background-color: #dc3545;
+  color: white;
+}
+
+.cancelBtn:hover {
+  background-color: #c82333;
+}
+
+.matchSelect {
+  padding: 2px 4px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 11px;
+  margin-left: 4px;
+}

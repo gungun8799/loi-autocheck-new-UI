@@ -48,6 +48,11 @@ const [editingWorkflowFor, setEditingWorkflowFor] = useState(null);
        search:        '',
        leadStatus:    ''
      });
+
+  // Manual validation editing states
+  const [editingCompare, setEditingCompare] = useState(null);
+  const [editingPdfValidation, setEditingPdfValidation] = useState(null);
+  const [editingWebValidation, setEditingWebValidation] = useState(null);
      // at the top of LOIDashboard, after your other useState calls:
 
   const [leadStatuses, setLeadStatuses] = useState({});
@@ -603,6 +608,143 @@ const handleTodaysReport = () => {
     }
   };
 
+  // Manual validation handler functions
+  const saveCompareEdit = async (contractNumber, fieldIndex) => {
+    try {
+      console.log('Saving compare edit:', { contractNumber, fieldIndex, editingCompare });
+      const response = await api.post('/manual-validation/compare', {
+        contractNumber,
+        fieldIndex,
+        updates: {
+          match: editingCompare.match,
+          reason: editingCompare.reason
+        },
+        user: user?.username || 'Unknown'
+      });
+
+      if (response.data.success) {
+        // Update local state
+        setContracts(prevContracts =>
+          prevContracts.map(contract =>
+            contract.contract_number === contractNumber
+              ? {
+                  ...contract,
+                  compare_result: contract.compare_result.map((item, index) =>
+                    index === fieldIndex
+                      ? {
+                          ...item,
+                          match: editingCompare.match,
+                          reason: editingCompare.reason,
+                          manually_validated: true,
+                          validated_by: user?.username || 'Unknown',
+                          validated_at: new Date()
+                        }
+                      : item
+                  )
+                }
+              : contract
+          )
+        );
+        
+        setEditingCompare(null);
+        alert('✅ Compare result updated successfully');
+      }
+    } catch (error) {
+      console.error('Error saving compare edit:', error);
+      alert('❌ Failed to update compare result');
+    }
+  };
+
+  const savePdfValidationEdit = async (contractNumber, fieldIndex) => {
+    try {
+      const response = await api.post('/manual-validation/pdf-validation', {
+        contractNumber,
+        fieldIndex,
+        updates: {
+          valid: editingPdfValidation.valid,
+          reason: editingPdfValidation.reason
+        },
+        user: user?.username || 'Unknown'
+      });
+
+      if (response.data.success) {
+        // Update local state
+        setContracts(prevContracts =>
+          prevContracts.map(contract =>
+            contract.contract_number === contractNumber
+              ? {
+                  ...contract,
+                  validation_result: contract.validation_result.map((item, index) =>
+                    index === fieldIndex
+                      ? {
+                          ...item,
+                          valid: editingPdfValidation.valid,
+                          reason: editingPdfValidation.reason,
+                          manually_validated: true,
+                          validated_by: user?.username || 'Unknown',
+                          validated_at: new Date()
+                        }
+                      : item
+                  )
+                }
+              : contract
+          )
+        );
+        
+        setEditingPdfValidation(null);
+        alert('✅ PDF validation updated successfully');
+      }
+    } catch (error) {
+      console.error('Error saving PDF validation edit:', error);
+      alert('❌ Failed to update PDF validation');
+    }
+  };
+
+  const saveWebValidationEdit = async (contractNumber, fieldIndex) => {
+    try {
+      const response = await api.post('/manual-validation/web-validation', {
+        contractNumber,
+        fieldIndex,
+        updates: {
+          valid: editingWebValidation.valid,
+          reason: editingWebValidation.reason
+        },
+        user: user?.username || 'Unknown'
+      });
+
+      if (response.data.success) {
+        // Update local state
+        setContracts(prevContracts =>
+          prevContracts.map(contract =>
+            contract.contract_number === contractNumber
+              ? {
+                  ...contract,
+                  web_validation_result: contract.web_validation_result.map((item, index) =>
+                    index === fieldIndex
+                      ? {
+                          ...item,
+                          valid: editingWebValidation.valid,
+                          reason: editingWebValidation.reason,
+                          manually_validated: true,
+                          validated_by: user?.username || 'Unknown',
+                          validated_at: new Date()
+                        }
+                      : item
+                  )
+                }
+              : contract
+          )
+        );
+        
+        setEditingWebValidation(null);
+        alert('✅ Web validation updated successfully');
+      }
+    } catch (error) {
+      console.error('Error saving web validation edit:', error);
+      alert('❌ Failed to update web validation');
+    }
+  };
+
   // Helper to format Firestore timestamp (or plain JS Date) as "DD-MMM-YYYY"
 // ─── Revised formatDate helper ──────────────────────────────────
 // Converts Firestore Timestamp (or plain object with .seconds) or JS Date/string
@@ -860,6 +1002,15 @@ const getContractDate = (ts) => {
           toggleTenantType={toggleTenantType}
           isValid={isValid}
           formatDate={formatDate}
+          editingCompare={editingCompare}
+          setEditingCompare={setEditingCompare}
+          editingPdfValidation={editingPdfValidation}
+          setEditingPdfValidation={setEditingPdfValidation}
+          editingWebValidation={editingWebValidation}
+          setEditingWebValidation={setEditingWebValidation}
+          saveCompareEdit={saveCompareEdit}
+          savePdfValidationEdit={savePdfValidationEdit}
+          saveWebValidationEdit={saveWebValidationEdit}
         />
       )}
 
@@ -1061,7 +1212,9 @@ function ContractListTab({
   handleBulkDelete, handleSelectContract, handleSelectAll, toggleDetails, 
   handleLeadStatusChange, handleWorkflowStatusChange, refreshContractStatus, 
   forceProcessFile, autoProcessContracts, toggleLeaseType, toggleTenantType, 
-  isValid, formatDate 
+  isValid, formatDate, editingCompare, setEditingCompare, editingPdfValidation,
+  setEditingPdfValidation, editingWebValidation, setEditingWebValidation,
+  saveCompareEdit, savePdfValidationEdit, saveWebValidationEdit
 }) {
   const passedCount = filteredContracts.filter(c => isValid(c)).length;
   const reviewCount = filteredContracts.length - passedCount;
@@ -1470,6 +1623,7 @@ function ContractListTab({
                                   <th>Web</th>
                                   <th>Match</th>
                                   <th>Reason</th>
+                                  {user?.role !== 'user' && <th>Actions</th>}
                                 </tr>
                               </thead>
                               <tbody>
@@ -1498,15 +1652,73 @@ function ContractListTab({
                                     }
                                     return true;
                                   })
-                                  .map((row, i) => (
-                                  <tr key={i}>
+                                  .map((row, i) => {
+                                    // Find the actual index in the original array
+                                    const actualIndex = contract.compare_result.findIndex(r => r.field === row.field);
+                                    return (
+                                  <tr key={i} style={row.manually_validated ? {backgroundColor: '#f0f8ff'} : {}}>
                                     <td>{row.field}</td>
                                     <td>{row.pdf}</td>
                                     <td>{row.web}</td>
-                                    <td>{row.match ? '✅' : '❌'}</td>
-                                    <td>{row.reason || '—'}</td>
+                                    <td>
+                                      {row.match ? '✅' : '❌'}
+                                      {row.manually_validated && ' 👤'}
+                                    </td>
+                                    <td>
+                                      {editingCompare?.contractId === contract.contract_number && editingCompare?.index === actualIndex ? (
+                                        <input
+                                          type="text"
+                                          value={editingCompare.reason}
+                                          onChange={(e) => setEditingCompare({...editingCompare, reason: e.target.value})}
+                                          className={styles.editInput}
+                                        />
+                                      ) : (
+                                        row.reason || '—'
+                                      )}
+                                    </td>
+                                    {user?.role !== 'user' && (
+                                      <td>
+                                        {editingCompare?.contractId === contract.contract_number && editingCompare?.index === actualIndex ? (
+                                          <div className={styles.editActions}>
+                                            <button
+                                              className={styles.saveBtn}
+                                              onClick={() => saveCompareEdit(contract.contract_number, actualIndex)}
+                                            >
+                                              💾
+                                            </button>
+                                            <button
+                                              className={styles.cancelBtn}
+                                              onClick={() => setEditingCompare(null)}
+                                            >
+                                              ❌
+                                            </button>
+                                            <select
+                                              value={editingCompare.match}
+                                              onChange={(e) => setEditingCompare({...editingCompare, match: e.target.value === 'true'})}
+                                              className={styles.matchSelect}
+                                            >
+                                              <option value="true">✅ Match</option>
+                                              <option value="false">❌ No Match</option>
+                                            </select>
+                                          </div>
+                                        ) : (
+                                          <button
+                                            className={styles.editBtn}
+                                            onClick={() => setEditingCompare({
+                                              contractId: contract.contract_number,
+                                              index: actualIndex,
+                                              match: row.match,
+                                              reason: row.reason || ''
+                                            })}
+                                          >
+                                            ✏️
+                                          </button>
+                                        )}
+                                      </td>
+                                    )}
                                   </tr>
-                                ))}
+                                  );
+                                })}
                               </tbody>
                             </table>
 
@@ -1518,6 +1730,7 @@ function ContractListTab({
                                   <th>Value</th>
                                   <th>Valid</th>
                                   <th>Reason</th>
+                                  {user?.role !== 'user' && <th>Actions</th>}
                                 </tr>
                               </thead>
                               <tbody>
@@ -1625,14 +1838,72 @@ function ContractListTab({
                                     
                                     return 0;
                                   })
-                                  .map((row, i) => (
-                                  <tr key={i}>
+                                  .map((row, i) => {
+                                    // Find the actual index in the original array
+                                    const actualIndex = contract.validation_result.findIndex(r => r.field === row.field);
+                                    return (
+                                  <tr key={i} style={row.manually_validated ? {backgroundColor: '#f0f8ff'} : {}}>
                                     <td>{row.field}</td>
                                     <td>{row.value}</td>
-                                    <td>{row.valid ? '✅' : '❌'}</td>
-                                    <td>{row.reason || '—'}</td>
+                                    <td>
+                                      {row.valid ? '✅' : '❌'}
+                                      {row.manually_validated && ' 👤'}
+                                    </td>
+                                    <td>
+                                      {editingPdfValidation?.contractId === contract.contract_number && editingPdfValidation?.index === actualIndex ? (
+                                        <input
+                                          type="text"
+                                          value={editingPdfValidation.reason}
+                                          onChange={(e) => setEditingPdfValidation({...editingPdfValidation, reason: e.target.value})}
+                                          className={styles.editInput}
+                                        />
+                                      ) : (
+                                        row.reason || '—'
+                                      )}
+                                    </td>
+                                    {user?.role !== 'user' && (
+                                      <td>
+                                        {editingPdfValidation?.contractId === contract.contract_number && editingPdfValidation?.index === actualIndex ? (
+                                          <div className={styles.editActions}>
+                                            <button
+                                              className={styles.saveBtn}
+                                              onClick={() => savePdfValidationEdit(contract.contract_number, actualIndex)}
+                                            >
+                                              💾
+                                            </button>
+                                            <button
+                                              className={styles.cancelBtn}
+                                              onClick={() => setEditingPdfValidation(null)}
+                                            >
+                                              ❌
+                                            </button>
+                                            <select
+                                              value={editingPdfValidation.valid}
+                                              onChange={(e) => setEditingPdfValidation({...editingPdfValidation, valid: e.target.value === 'true'})}
+                                              className={styles.matchSelect}
+                                            >
+                                              <option value="true">✅ Valid</option>
+                                              <option value="false">❌ Invalid</option>
+                                            </select>
+                                          </div>
+                                        ) : (
+                                          <button
+                                            className={styles.editBtn}
+                                            onClick={() => setEditingPdfValidation({
+                                              contractId: contract.contract_number,
+                                              index: actualIndex,
+                                              valid: row.valid,
+                                              reason: row.reason || ''
+                                            })}
+                                          >
+                                            ✏️
+                                          </button>
+                                        )}
+                                      </td>
+                                    )}
                                   </tr>
-                                ))}
+                                  );
+                                })}
                               </tbody>
                             </table>
 
@@ -1644,6 +1915,7 @@ function ContractListTab({
                                   <th>Value</th>
                                   <th>Valid</th>
                                   <th>Reason</th>
+                                  {user?.role !== 'user' && <th>Actions</th>}
                                 </tr>
                               </thead>
                               <tbody>
@@ -1676,14 +1948,72 @@ function ContractListTab({
                                     }
                                     return true;
                                   })
-                                  .map((row, i) => (
-                                  <tr key={i}>
+                                  .map((row, i) => {
+                                    // Find the actual index in the original array
+                                    const actualIndex = contract.web_validation_result.findIndex(r => r.field === row.field);
+                                    return (
+                                  <tr key={i} style={row.manually_validated ? {backgroundColor: '#f0f8ff'} : {}}>
                                     <td>{row.field}</td>
                                     <td>{row.value}</td>
-                                    <td>{row.valid ? '✅' : '❌'}</td>
-                                    <td>{row.reason || '—'}</td>
+                                    <td>
+                                      {row.valid ? '✅' : '❌'}
+                                      {row.manually_validated && ' 👤'}
+                                    </td>
+                                    <td>
+                                      {editingWebValidation?.contractId === contract.contract_number && editingWebValidation?.index === actualIndex ? (
+                                        <input
+                                          type="text"
+                                          value={editingWebValidation.reason}
+                                          onChange={(e) => setEditingWebValidation({...editingWebValidation, reason: e.target.value})}
+                                          className={styles.editInput}
+                                        />
+                                      ) : (
+                                        row.reason || '—'
+                                      )}
+                                    </td>
+                                    {user?.role !== 'user' && (
+                                      <td>
+                                        {editingWebValidation?.contractId === contract.contract_number && editingWebValidation?.index === actualIndex ? (
+                                          <div className={styles.editActions}>
+                                            <button
+                                              className={styles.saveBtn}
+                                              onClick={() => saveWebValidationEdit(contract.contract_number, actualIndex)}
+                                            >
+                                              💾
+                                            </button>
+                                            <button
+                                              className={styles.cancelBtn}
+                                              onClick={() => setEditingWebValidation(null)}
+                                            >
+                                              ❌
+                                            </button>
+                                            <select
+                                              value={editingWebValidation.valid}
+                                              onChange={(e) => setEditingWebValidation({...editingWebValidation, valid: e.target.value === 'true'})}
+                                              className={styles.matchSelect}
+                                            >
+                                              <option value="true">✅ Valid</option>
+                                              <option value="false">❌ Invalid</option>
+                                            </select>
+                                          </div>
+                                        ) : (
+                                          <button
+                                            className={styles.editBtn}
+                                            onClick={() => setEditingWebValidation({
+                                              contractId: contract.contract_number,
+                                              index: actualIndex,
+                                              valid: row.valid,
+                                              reason: row.reason || ''
+                                            })}
+                                          >
+                                            ✏️
+                                          </button>
+                                        )}
+                                      </td>
+                                    )}
                                   </tr>
-                                ))}
+                                  );
+                                })}
                               </tbody>
                             </table>
 
